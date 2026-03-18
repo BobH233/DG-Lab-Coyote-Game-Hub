@@ -1,3 +1,4 @@
+import { GameChannelId, gameChannelIdList } from "#app/types/game.js";
 import { CoyoteGameController } from "../CoyoteGameController.js";
 
 export abstract class AbstractGameAction<ActionConfig = any> {
@@ -24,6 +25,14 @@ export abstract class AbstractGameAction<ActionConfig = any> {
 
     initialize() {
         // Subclass could override this method
+    }
+
+    /**
+     * 返回当前动作需要独占的通道。
+     * 默认占用所有通道，避免未知动作与默认任务并发执行。
+     */
+    public getOccupiedChannels(): GameChannelId[] {
+        return [...gameChannelIdList];
     }
 
     /** 执行游戏动作 */

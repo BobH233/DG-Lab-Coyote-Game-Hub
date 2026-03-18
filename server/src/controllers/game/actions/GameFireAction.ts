@@ -67,10 +67,14 @@ export class GameFireAction extends AbstractGameAction<GameFireActionConfig> {
     }
 
     private refreshFireChannels(): void {
+        const hasSharedChannelConfig = typeof this.config.strength === 'number' || typeof this.config.pulseId === 'string';
+
         for (const channelId of gameChannelIdList) {
             const channelConfig = this.game.getChannelConfig(channelId);
             const overrideConfig = this.config.channels?.[channelId] ?? {};
-            const enabled = channelConfig.enabled && overrideConfig.enabled !== false;
+            const hasChannelOverride = Object.prototype.hasOwnProperty.call(this.config.channels ?? {}, channelId);
+            const enabledByRequest = hasSharedChannelConfig ? !hasChannelOverride || overrideConfig.enabled !== false : hasChannelOverride && overrideConfig.enabled !== false;
+            const enabled = channelConfig.enabled && enabledByRequest;
 
             const requestedStrength = overrideConfig.strength ?? this.config.strength ?? channelConfig.fireStrengthLimit;
             const fireStrength = Math.min(requestedStrength, channelConfig.fireStrengthLimit || FIRE_MAX_STRENGTH);
@@ -96,6 +100,10 @@ export class GameFireAction extends AbstractGameAction<GameFireActionConfig> {
 
     private getEnabledChannels(): GameChannelId[] {
         return gameChannelIdList.filter((channelId) => this.fireChannels[channelId].enabled && this.fireChannels[channelId].fireStrength > 0);
+    }
+
+    public override getOccupiedChannels(): GameChannelId[] {
+        return this.getEnabledChannels();
     }
 
     private async applyCurrentFireStrength(channelId: GameChannelId): Promise<void> {
@@ -128,6 +136,10 @@ export class GameFireAction extends AbstractGameAction<GameFireActionConfig> {
             this.game.setTempStrength(channelId, fireState.currentFireStrength);
         }
 
+        await Promise.all(
+            enabledChannels.map((channelId) => this.game.client?.clearChannelPulse(channelMap[channelId]))
+        );
+
         await Promise.all(enabledChannels.map((channelId) => this.applyCurrentFireStrength(channelId)));
 
         const boostAb = new AbortController();
@@ -158,22 +170,26 @@ export class GameFireAction extends AbstractGameAction<GameFireActionConfig> {
             }
         }, 200);
 
-        const outputTime = Math.min(this.fireEndTimestamp - Date.now(), 30000);
-        await Promise.all(
-            enabledChannels.map((channelId) => {
-                const fireState = this.fireChannels[channelId];
-                return this.game.client?.outputPulse(channelMap[channelId], fireState.firePulseId, outputTime, {
-                    abortController: ab,
-                });
-            })
-        );
+        try {
+            const outputTime = Math.min(this.fireEndTimestamp - Date.now(), 30000);
+            await Promise.all(
+                enabledChannels.map((channelId) => {
+                    const fireState = this.fireChannels[channelId];
+                    return this.game.client?.outputPulse(channelMap[channelId], fireState.firePulseId, outputTime, {
+                        abortController: ab,
+                    });
+                })
+            );
+        } finally {
+            boostAb.abort();
+            clearInterval(setStrengthInterval);
+        }
 
-        boostAb.abort();
-        clearInterval(setStrengthInterval);
-
-        if (Date.now() > this.fireEndTimestamp) {
+        if (ab.signal.aborted || Date.now() > this.fireEndTimestamp) {
             await this.restoreBaseStrength();
-            done();
+            if (!ab.signal.aborted) {
+                done();
+            }
             return;
         }
 

@@ -77,6 +77,7 @@ export class CoyoteGameController {
     private channelTasks: Partial<Record<GameChannelId, Task>> = {};
     private actionAbortController: AbortController | null = null;
     private actionRunner: Promise<void> | null = null;
+    private runningAction: AbstractGameAction | null = null;
     private started = false;
 
     private _tempStrength: Record<GameChannelId, number> = {
@@ -304,9 +305,8 @@ export class CoyoteGameController {
 
         this.actionList.sort((a, b) => b.priority - a.priority);
 
-        existsIndex = this.actionList.findIndex((a) => a.constructor === action.constructor);
-        if (existsIndex === 0 && this.started) {
-            await this.restartGame();
+        if (this.started) {
+            await this.refreshRunners();
         }
     }
 
@@ -315,8 +315,8 @@ export class CoyoteGameController {
         if (existsIndex >= 0) {
             this.actionList.splice(existsIndex, 1);
 
-            if (existsIndex === 0 && this.started) {
-                await this.restartGame();
+            if (this.started) {
+                await this.refreshRunners();
             }
         }
     }
@@ -413,10 +413,23 @@ export class CoyoteGameController {
         });
     }
 
-    private async startDefaultChannelTasks(): Promise<void> {
-        await this.stopDefaultChannelTasks();
+    private async startDefaultChannelTasks(excludedChannels: Set<GameChannelId> = new Set()): Promise<void> {
+        for (const channelId of gameChannelIdList) {
+            const shouldRun = this.getChannelConfig(channelId).enabled && !excludedChannels.has(channelId);
+            const existingTask = this.channelTasks[channelId];
 
-        for (const channelId of this.getEnabledChannels()) {
+            if (!shouldRun) {
+                if (existingTask) {
+                    delete this.channelTasks[channelId];
+                    await existingTask.abort();
+                }
+                continue;
+            }
+
+            if (existingTask) {
+                continue;
+            }
+
             const task = new Task((ab, harvest) => this.runChannelTask(channelId, ab, harvest));
             task.on('error', (error) => {
                 console.error(`Channel ${channelId.toUpperCase()} task error:`, error);
@@ -425,11 +438,16 @@ export class CoyoteGameController {
         }
     }
 
-    private async stopDefaultChannelTasks(): Promise<void> {
-        const taskList = Object.values(this.channelTasks).filter(Boolean) as Task[];
-        this.channelTasks = {};
+    private async stopDefaultChannelTasks(channelIds?: GameChannelId[]): Promise<void> {
+        const targetChannelIds = channelIds ?? [...gameChannelIdList];
 
-        for (const task of taskList) {
+        for (const channelId of targetChannelIds) {
+            const task = this.channelTasks[channelId];
+            if (!task) {
+                continue;
+            }
+
+            delete this.channelTasks[channelId];
             await task.abort();
         }
     }
@@ -448,6 +466,7 @@ export class CoyoteGameController {
         };
 
         this.actionAbortController = actionAb;
+        this.runningAction = currentAction;
 
         const runner = currentAction.execute(actionAb, harvest, () => {
             this.actionList.shift();
@@ -462,6 +481,10 @@ export class CoyoteGameController {
                 this.actionAbortController = null;
             }
 
+            if (this.runningAction === currentAction) {
+                this.runningAction = null;
+            }
+
             if (this.actionRunner === runner) {
                 this.actionRunner = null;
             }
@@ -470,13 +493,9 @@ export class CoyoteGameController {
                 return;
             }
 
-            if (this.actionList.length > 0) {
-                this.startActionRunner();
-            } else {
-                this.startDefaultChannelTasks().catch((error) => {
-                    console.error('Failed to restart default channel tasks:', error);
-                });
-            }
+            this.refreshRunners().catch((error) => {
+                console.error('Failed to refresh runners after action completed:', error);
+            });
         });
 
         this.actionRunner = runner;
@@ -493,19 +512,42 @@ export class CoyoteGameController {
 
         this.actionAbortController = null;
         this.actionRunner = null;
+        this.runningAction = null;
     }
 
-    private async startRunners(): Promise<void> {
+    private getCurrentActionOccupiedChannels(): Set<GameChannelId> {
+        const currentAction = this.actionList[0];
+        if (!currentAction) {
+            return new Set();
+        }
+
+        return new Set(currentAction.getOccupiedChannels());
+    }
+
+    private async refreshRunners(): Promise<void> {
         if (!this.started || !this.client) {
             return;
         }
 
-        if (this.actionList.length > 0) {
-            this.startActionRunner();
+        const currentAction = this.actionList[0] ?? null;
+        if (!currentAction || (this.runningAction && this.runningAction !== currentAction)) {
+            await this.stopActionRunner();
+        }
+
+        const occupiedChannels = this.getCurrentActionOccupiedChannels();
+        await this.startDefaultChannelTasks(occupiedChannels);
+
+        if (!currentAction) {
             return;
         }
 
-        await this.startDefaultChannelTasks();
+        if (!this.actionRunner) {
+            this.startActionRunner();
+        }
+    }
+
+    private async startRunners(): Promise<void> {
+        await this.refreshRunners();
     }
 
     private async stopRunners(): Promise<void> {

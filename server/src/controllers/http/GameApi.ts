@@ -584,9 +584,23 @@ export class GameApiController {
         }
 
         const successClientIds = new Set<string>();
+        const failedClientIds = new Set<string>();
         for (const clientId of clientIdList) {
-            await GameModel.updateConfig(ctx.database, clientId, postBody);
-            successClientIds.add(clientId);
+            const updatedGame = await GameModel.updateConfig(ctx.database, clientId, postBody);
+            if (updatedGame) {
+                successClientIds.add(clientId);
+            } else {
+                failedClientIds.add(clientId);
+            }
+        }
+
+        if (successClientIds.size === 0) {
+            apiResponse(ctx, {
+                status: 0,
+                code: 'ERR::GAME_NOT_FOUND',
+                message: '游戏配置不存在，可能是控制器未连接',
+            });
+            return;
         }
 
         apiResponse(ctx, {
@@ -594,6 +608,12 @@ export class GameApiController {
             code: 'OK',
             message: `成功设置了 ${successClientIds.size} 个游戏的主配置`,
             successClientIds: Array.from(successClientIds),
+            ...(failedClientIds.size > 0 ? {
+                warnings: [{
+                    code: 'WARN::GAME_NOT_FOUND',
+                    message: `以下客户端未找到，已跳过: ${Array.from(failedClientIds).join(', ')}`,
+                }],
+            } : {}),
         } as SetConfigResponse);
     }
 
@@ -723,9 +743,23 @@ export class GameApiController {
         }
 
         const successClientIds = new Set<string>();
+        const failedClientIds = new Set<string>();
         for (const clientId of clientIdList) {
-            await GameModel.updateConfig(ctx.database, clientId, updateConfig);
-            successClientIds.add(clientId);
+            const updatedGame = await GameModel.updateConfig(ctx.database, clientId, updateConfig);
+            if (updatedGame) {
+                successClientIds.add(clientId);
+            } else {
+                failedClientIds.add(clientId);
+            }
+        }
+
+        if (successClientIds.size === 0) {
+            apiResponse(ctx, {
+                status: 0,
+                code: 'ERR::GAME_NOT_FOUND',
+                message: '游戏配置不存在，可能是控制器未连接',
+            });
+            return;
         }
 
         apiResponse(ctx, {
@@ -733,6 +767,12 @@ export class GameApiController {
             code: 'OK',
             message: `成功设置了 ${successClientIds.size} 个游戏的波形ID`,
             successClientIds: Array.from(successClientIds),
+            ...(failedClientIds.size > 0 ? {
+                warnings: [{
+                    code: 'WARN::GAME_NOT_FOUND',
+                    message: `以下客户端未找到，已跳过: ${Array.from(failedClientIds).join(', ')}`,
+                }],
+            } : {}),
         } as SetConfigResponse);
     }
 

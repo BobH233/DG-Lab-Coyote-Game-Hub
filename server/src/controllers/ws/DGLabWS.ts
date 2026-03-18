@@ -237,7 +237,7 @@ export class DGLabWSClient {
         return ret;
     }
 
-    private async clearPulse(channel: Channel): Promise<boolean> {
+    public async clearChannelPulse(channel: Channel): Promise<boolean> {
         const channel_id = channel === Channel.A ? "1" : "2";
 
         let ret = await this.send(MessageType.MSG, `${MessageDataHead.CLEAR}-${channel_id}`);
@@ -294,8 +294,8 @@ export class DGLabWSClient {
 
     public async reset() {
         await Promise.all([
-            this.clearPulse(Channel.A),
-            this.clearPulse(Channel.B),
+            this.clearChannelPulse(Channel.A),
+            this.clearChannelPulse(Channel.B),
         ]);
     }
 
