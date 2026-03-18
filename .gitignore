@@ -25,3 +25,4 @@ server/bun.lock
 .gitnexus
 
 /server/data/*.sqlite
+

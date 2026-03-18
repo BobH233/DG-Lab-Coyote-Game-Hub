@@ -3,11 +3,21 @@ import path from 'path';
 import { LRUCache } from "lru-cache";
 
 import { ExEventEmitter } from "#app/utils/ExEventEmitter.js";
-import { GameCustomPulseConfig, GameCustomPulseConfigSchema, MainGameConfig, MainGameConfigSchema } from '#app/types/game.js';
+import {
+    createDefaultGameStrengthConfig,
+    createDefaultMainGameConfig,
+    GameCustomPulseConfig,
+    GameCustomPulseConfigSchema,
+    GameStrengthConfig,
+    MainGameConfig,
+    normalizeGameStrengthConfig,
+    normalizeMainGameConfig,
+} from '#app/types/game.js';
 import { DGLabPulseService } from './DGLabPulse.js';
 import { z } from 'koa-swagger-decorator';
 
 export enum GameConfigType {
+    Strength = 'strength',
     MainGame = 'main-game',
     CustomPulse = 'custom-pulse',
 }
@@ -17,6 +27,7 @@ export interface CoyoteLiveGameManagerEvents {
 };
 
 export type GameConfigTypeMap = {
+    [GameConfigType.Strength]: GameStrengthConfig,
     [GameConfigType.MainGame]: MainGameConfig,
     [GameConfigType.CustomPulse]: GameCustomPulseConfig,
 };
@@ -51,16 +62,10 @@ export class CoyoteGameConfigService {
     }
 
     public getDefaultConfig(type: GameConfigType) {
-        if (type === GameConfigType.MainGame) {
-            return {
-                fireStrengthLimit: 30,
-                strengthChangeInterval: [15, 30],
-                enableBChannel: false,
-                bChannelStrengthMultiplier: 1,
-                pulseId: DGLabPulseService.instance.getDefaultPulse().id,
-                pulseMode: 'single',
-                pulseChangeInterval: 60,
-            } as MainGameConfig;
+        if (type === GameConfigType.Strength) {
+            return createDefaultGameStrengthConfig() as GameStrengthConfig;
+        } else if (type === GameConfigType.MainGame) {
+            return createDefaultMainGameConfig(DGLabPulseService.instance.getDefaultPulse().id) as MainGameConfig;
         } else if (type === GameConfigType.CustomPulse) {
             return {
                 customPulseList: [],
@@ -93,8 +98,11 @@ export class CoyoteGameConfigService {
 
             try {
                 switch (type) {
+                    case GameConfigType.Strength:
+                        config = normalizeGameStrengthConfig(config);
+                        break;
                     case GameConfigType.MainGame:
-                        config = MainGameConfigSchema.parse(config);
+                        config = normalizeMainGameConfig(config, DGLabPulseService.instance.getDefaultPulse().id);
                         break;
                     case GameConfigType.CustomPulse:
                         config = GameCustomPulseConfigSchema.parse(config);

@@ -640,9 +640,9 @@ export class MCPApiController {
             const game = validation.game;
             const strengthInfo = {
                 gameId: session.gameId!,
-                currentStrength: game?.strengthConfig?.strength || 0,
+                currentStrength: game?.strengthConfig?.a?.strength || 0,
                 strengthLimit: 200,
-                randomStrength: game?.strengthConfig?.randomStrength || 0,
+                randomStrength: game?.strengthConfig?.a?.randomStrength || 0,
                 isConnected: !!game?.client,
                 isStarted: !!game?.running,
                 lastUpdated: new Date().toISOString()
@@ -712,9 +712,9 @@ export class MCPApiController {
      * 获取强度状态的自然语言描述
      */
     private static getStrengthStatusMessage(game: CoyoteGameController, operation: string, oldStrength?: number, newStrength?: number): string {
-        const current = newStrength ?? game.strengthConfig.strength ?? 0;
+        const current = newStrength ?? game.strengthConfig.a.strength ?? 0;
         const limit = game.clientStrength.limit ?? 20;
-        const random = game.strengthConfig.randomStrength ?? 0;
+        const random = game.strengthConfig.a.randomStrength ?? 0;
         const started = game.running ? "已启动" : "未启动";
 
         let message = `${operation}成功。`;
@@ -782,14 +782,17 @@ export class MCPApiController {
 
         const game = validation.game;
         const gameConfig = await GameModel.getByGameId(ctx.database, session.gameId!);
+        const mainGameConfig = gameConfig?.toMainGameConfig();
+        const aPulseId = mainGameConfig?.channels.a.pulseId;
+        const currentPulseId = Array.isArray(aPulseId) ? aPulseId[0] : aPulseId;
 
         const status: GameStatus = {
             gameId: session.gameId!,
             isStarted: game?.running || false,
-            currentStrength: game?.strengthConfig.strength || 0,
-            randomStrengthRange: game?.strengthConfig.randomStrength || 0,
+            currentStrength: game?.strengthConfig.a.strength || 0,
+            randomStrengthRange: game?.strengthConfig.a.randomStrength || 0,
             strengthLimit: game?.clientStrength.limit || 0,
-            currentPulseId: Array.isArray(gameConfig?.pulseId) ? gameConfig.pulseId[0] : (gameConfig?.pulseId || 'default'),
+            currentPulseId: currentPulseId || 'default',
             message: game ? this.getStrengthStatusMessage(game, "获取游戏状态") : '未连接到游戏（控制器）',
         };
 
@@ -823,14 +826,17 @@ export class MCPApiController {
             };
         }
 
-        const oldStrength = game.strengthConfig?.strength || 0;
+        const oldStrength = game.strengthConfig.a.strength || 0;
 
         strength = Math.min(Math.max(strength, 0), game.clientStrength.limit); // 确保强度不超过限制
 
         // 设置强度
         game.updateStrengthConfig({
-            strength: strength,
-            randomStrength: game.strengthConfig.randomStrength,
+            a: {
+                strength,
+                randomStrength: game.strengthConfig.a.randomStrength,
+            },
+            b: game.strengthConfig.b,
         });
 
         // 发送资源更新通知
@@ -841,7 +847,7 @@ export class MCPApiController {
             oldStrength,
             newStrength: strength,
             strengthLimit: 200,
-            randomStrength: game.strengthConfig.randomStrength || 0,
+            randomStrength: game.strengthConfig.a.randomStrength || 0,
             message: this.getStrengthStatusMessage(game, "设置电量", oldStrength, strength)
         };
     }
@@ -865,13 +871,16 @@ export class MCPApiController {
             };
         }
 
-        const oldStrength = game.strengthConfig?.strength || 0;
+        const oldStrength = game.strengthConfig.a.strength || 0;
         const strength = Math.min(Math.max(oldStrength + amount, 0), game.clientStrength.limit); // 确保强度不超过限制
 
         // 设置强度
         game.updateStrengthConfig({
-            strength: strength,
-            randomStrength: game.strengthConfig.randomStrength,
+            a: {
+                strength,
+                randomStrength: game.strengthConfig.a.randomStrength,
+            },
+            b: game.strengthConfig.b,
         });
 
         // 发送资源更新通知
@@ -882,7 +891,7 @@ export class MCPApiController {
             oldStrength,
             newStrength: strength,
             strengthLimit: 200,
-            randomStrength: game.strengthConfig.randomStrength || 0,
+            randomStrength: game.strengthConfig.a.randomStrength || 0,
             message: this.getStrengthStatusMessage(game, "增加电量", oldStrength, strength)
         };
     }
@@ -906,13 +915,16 @@ export class MCPApiController {
             };
         }
 
-        const oldStrength = game.strengthConfig?.strength || 0;
+        const oldStrength = game.strengthConfig.a.strength || 0;
         const strength = Math.min(Math.max(oldStrength - amount, 0), game.clientStrength.limit); // 确保强度不超过限制
 
         // 设置强度
         game.updateStrengthConfig({
-            strength: strength,
-            randomStrength: game.strengthConfig.randomStrength,
+            a: {
+                strength,
+                randomStrength: game.strengthConfig.a.randomStrength,
+            },
+            b: game.strengthConfig.b,
         });
 
         // 发送资源更新通知
@@ -923,7 +935,7 @@ export class MCPApiController {
             oldStrength,
             newStrength: strength,
             strengthLimit: 200,
-            randomStrength: game.strengthConfig.randomStrength || 0,
+            randomStrength: game.strengthConfig.a.randomStrength || 0,
             message: this.getStrengthStatusMessage(game, "减少电量", oldStrength, strength)
         };
     }
@@ -951,8 +963,12 @@ export class MCPApiController {
         }
 
         // 更新游戏配置
-        await GameModel.update(ctx.database, session.gameId!, {
-            pulseId: pulseId
+        await GameModel.updateConfig(ctx.database, session.gameId!, {
+            channels: {
+                a: {
+                    pulseId,
+                },
+            },
         });
 
         return {

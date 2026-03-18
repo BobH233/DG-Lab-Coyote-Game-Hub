@@ -26,6 +26,11 @@ export type PulseItemResponse = {
 };
 
 export type GameStrengthInfo = {
+    a: ChannelStrengthInfo;
+    b: ChannelStrengthInfo;
+};
+
+export type ChannelStrengthInfo = {
     strength: number;
     limit: number;
     tempStrength: number;
@@ -37,6 +42,7 @@ export enum GameConfigType {
 }
 
 export type PulsePlayMode = 'single' | 'sequence' | 'random';
+export type GameChannelId = 'a' | 'b';
 
 export type RemoteNotificationInfo = {
     title?: string;
@@ -49,24 +55,31 @@ export type RemoteNotificationInfo = {
     urlLabel?: string;
 };
 
-export interface GameStrengthConfig {
+export interface ChannelStrengthConfig {
     strength: number;
     randomStrength: number;
 }
 
-export interface MainGameConfig {
-    fireStrengthLimit: number;
+export interface GameStrengthConfig {
+    a: ChannelStrengthConfig;
+    b: ChannelStrengthConfig;
+}
+
+export interface ChannelGameConfig {
+    enabled: boolean;
     strengthChangeInterval: [number, number];
-
-    enableBChannel: boolean;
-    /** B通道强度倍率 */
-    bChannelStrengthMultiplier: number;
-
+    fireStrengthLimit: number;
     pulseId: string | string[];
     firePulseId?: string | null;
-
     pulseMode: PulsePlayMode;
     pulseChangeInterval: number;
+}
+
+export interface MainGameConfig {
+    channels: {
+        a: ChannelGameConfig;
+        b: ChannelGameConfig;
+    };
 }
 
 export interface GameCustomPulseConfig {

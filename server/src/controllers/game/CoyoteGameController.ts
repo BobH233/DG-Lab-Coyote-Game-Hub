@@ -2,11 +2,18 @@ import { EventEmitter } from 'events';
 
 import { Channel } from '#app/types/dg.js';
 import { DGLabWSClient, StrengthInfo } from '../ws/DGLabWS.js';
-import { Task } from '#app/utils/task.js';
-import { asleep, debounce, randomInt, simpleObjDiff, throttle } from '#app/utils/utils.js';
+import { Task, TaskAbortedError } from '#app/utils/task.js';
+import { randomInt, simpleObjDiff, throttle } from '#app/utils/utils.js';
 import { EventStore } from '#app/utils/EventStore.js';
 import { CoyoteGameManager } from '#app/managers/CoyoteGameManager.js';
-import { MainGameConfig, GameStrengthConfig } from '#app/types/game.js';
+import {
+    createDefaultGameStrengthConfig,
+    GameChannelId,
+    GameStrengthConfig,
+    gameChannelIdList,
+    MainGameConfig,
+    normalizeGameStrengthConfig,
+} from '#app/types/game.js';
 import { PulsePlayList } from '#app/utils/PulsePlayList.js';
 import { AbstractGameAction } from './actions/AbstractGameAction.js';
 import { WebWSClient } from '../ws/WebWS.js';
@@ -15,10 +22,13 @@ import { LatencyLogger } from '#app/utils/latencyLogger.js';
 import { ServerContext } from '#app/types/server.js';
 import { GameModel } from '#app/models/GameModel.js';
 import { CustomPulseModel } from '#app/models/CustomPulseModel.js';
+import { CoyoteGameConfigService, GameConfigType as PersistedGameConfigType } from '#app/services/CoyoteGameConfigService.js';
 
-export type GameStrengthInfo = StrengthInfo & {
+export type GameChannelStrengthInfo = StrengthInfo & {
     tempStrength: number;
 };
+
+export type GameStrengthInfo = Record<GameChannelId, GameChannelStrengthInfo>;
 
 export interface CoyoteGameEvents {
     close: [];
@@ -29,6 +39,11 @@ export interface CoyoteGameEvents {
     gameStarted: [];
     gameStopped: [];
 }
+
+const channelMap: Record<GameChannelId, Channel> = {
+    a: Channel.A,
+    b: Channel.B,
+};
 
 export class CoyoteGameController {
     private ctx: ServerContext;
@@ -46,10 +61,7 @@ export class CoyoteGameController {
     public client?: DGLabWSClient;
 
     /** 强度配置 */
-    public strengthConfig: GameStrengthConfig = {
-        strength: 5,
-        randomStrength: 5,
-    };
+    public strengthConfig: GameStrengthConfig = createDefaultGameStrengthConfig();
 
     public gameConfig!: MainGameConfig;
 
@@ -62,41 +74,73 @@ export class CoyoteGameController {
     /** 当前游戏Action列表 */
     public actionList: AbstractGameAction[] = [];
 
-    private _tempStrength: number = 0;
+    private channelTasks: Partial<Record<GameChannelId, Task>> = {};
+    private actionAbortController: AbortController | null = null;
+    private actionRunner: Promise<void> | null = null;
+    private started = false;
+
+    private _tempStrength: Record<GameChannelId, number> = {
+        a: 0,
+        b: 0,
+    };
 
     /** 自定义波形列表 */
     public customPulseList: DGLabPulseInfo[] = [];
 
     /** 波形播放列表 */
-    public pulsePlayList!: PulsePlayList;
+    public pulsePlayLists!: Record<GameChannelId, PulsePlayList>;
 
     public events = new EventEmitter<CoyoteGameEvents>();
 
     private eventStore: EventStore = new EventStore();
 
-    /** 游戏主循环Task */
-    private gameTask: Task | null = null;
-
-    public get tempStrength(): number {
-        return this._tempStrength;
+    public get running() {
+        return this.started;
     }
 
-    public set tempStrength(value: number) {
-        this._tempStrength = value;
+    public getTempStrength(channelId: GameChannelId): number {
+        return this._tempStrength[channelId];
+    }
+
+    public setTempStrength(channelId: GameChannelId, value: number): void {
+        this._tempStrength[channelId] = value;
         this.events.emit('strengthChanged', this.gameStrength);
     }
 
-    public get clientStrength(): StrengthInfo {
-        return this.client?.strength ?? {
+    public resetTempStrength(): void {
+        this._tempStrength.a = 0;
+        this._tempStrength.b = 0;
+        this.events.emit('strengthChanged', this.gameStrength);
+    }
+
+    public getChannelClientStrength(channelId: GameChannelId): StrengthInfo {
+        if (channelId === 'a') {
+            return this.client?.strength ?? {
+                strength: 0,
+                limit: 20,
+            };
+        }
+
+        return this.client?.strengthChannelB ?? {
             strength: 0,
             limit: 20,
         };
     }
 
+    public get clientStrength(): StrengthInfo {
+        return this.getChannelClientStrength('a');
+    }
+
     public get gameStrength(): GameStrengthInfo {
         return {
-            ...this.clientStrength,
-            tempStrength: this._tempStrength,
+            a: {
+                ...this.getChannelClientStrength('a'),
+                tempStrength: this._tempStrength.a,
+            },
+            b: {
+                ...this.getChannelClientStrength('b'),
+                tempStrength: this._tempStrength.b,
+            },
         };
     }
 
@@ -106,27 +150,27 @@ export class CoyoteGameController {
     }
 
     async initialize(): Promise<void> {
-        this.gameConfig = await GameModel.getOrCreateByGameId(this.ctx.database, this.clientId);
+        const gameModel = await GameModel.getOrCreateByGameId(this.ctx.database, this.clientId);
+        this.gameConfig = gameModel.toMainGameConfig();
         this.customPulseList = await CustomPulseModel.getPulseListByGameId(this.ctx.database, this.clientId) ?? [];
-
-        // 初始化波形列表
-        let pulseList = typeof this.gameConfig.pulseId === 'string' ? [this.gameConfig.pulseId] : this.gameConfig.pulseId;
-        this.pulsePlayList = new PulsePlayList(pulseList, this.gameConfig.pulseMode, this.gameConfig.pulseChangeInterval);
+        this.pulsePlayLists = this.createPulsePlayLists();
 
         // 从缓存中恢复游戏状态
         const configCachePrefix = `coyoteLiveGameConfig:${this.clientId}:`;
-        const configCache  = CoyoteGameManager.instance.configCache;
-        let hasCachedConfig = false;
-
-        let cachedGameStrengthConfig = configCache.get(`${configCachePrefix}:strength`);
+        const configCache = CoyoteGameManager.instance.configCache;
+        const cachedGameStrengthConfig = configCache.get(`${configCachePrefix}:strength`);
         if (cachedGameStrengthConfig) {
-            this.strengthConfig = cachedGameStrengthConfig;
+            this.strengthConfig = normalizeGameStrengthConfig(cachedGameStrengthConfig);
             this.strengthConfigModified = Date.now();
-            hasCachedConfig = true;
-        }
-
-        if (hasCachedConfig) { // 有缓存配置时需要通知控制器更新配置
             this.events.emit('strengthConfigUpdated', this.strengthConfig);
+        } else {
+            const persistedStrengthConfig = await CoyoteGameConfigService.instance.get(this.clientId, PersistedGameConfigType.Strength, false);
+            if (persistedStrengthConfig) {
+                this.strengthConfig = normalizeGameStrengthConfig(persistedStrengthConfig);
+                this.strengthConfigModified = Date.now();
+                configCache.set(`${configCachePrefix}:strength`, this.strengthConfig);
+                this.events.emit('strengthConfigUpdated', this.strengthConfig);
+            }
         }
 
         // 监听游戏配置更新事件
@@ -137,47 +181,61 @@ export class CoyoteGameController {
 
         const pulseEvents = this.eventStore.wrap(CustomPulseModel.events);
         pulseEvents.on('pulseListUpdated', this.clientId, throttle(async () => {
-            // 重新加载自定义波形列表
             this.customPulseList = await CustomPulseModel.getPulseListByGameId(this.ctx.database, this.clientId);
         }, 100));
     }
 
-    public get running() {
-        return this.gameTask?.running ?? false;
+    public getChannelConfig(channelId: GameChannelId) {
+        return this.gameConfig.channels[channelId];
+    }
+
+    public getEnabledChannels(): GameChannelId[] {
+        return gameChannelIdList.filter((channelId) => this.gameConfig.channels[channelId].enabled);
+    }
+
+    public getCurrentPulseId(channelId: GameChannelId): string {
+        return this.pulsePlayLists[channelId].getCurrentPulseId();
+    }
+
+    public getCurrentPulseIds(): Record<GameChannelId, string> {
+        return {
+            a: this.getCurrentPulseId('a'),
+            b: this.getCurrentPulseId('b'),
+        };
     }
 
     public async bindClient(client: DGLabWSClient): Promise<void> {
         this.client = client;
         this.onlineSockets.add('dgclient');
 
+        await this.stopGame(true);
+        this.started = false;
         this.events.emit('clientConnected');
         this.events.emit('gameStopped');
 
-        await this.setClientStrength(0);
-        // 必须清空临时强度
-        this._tempStrength = 0;
-
-        // 通知客户端当前强度
-        this.events.emit('strengthChanged', {
-            limit: this.clientStrength.limit,
-            strength: 0,
-            tempStrength: 0,
-        });
+        await this.setChannelStrength('a', 0);
+        await this.setChannelStrength('b', 0);
+        this.resetTempStrength();
 
         const clientEvents = this.eventStore.wrap(this.client);
-        // 连接关闭事件
-        clientEvents.on('close', () => {
-            clientEvents.removeAllListeners(); // 将会同时清除EventStore中的引用
+        clientEvents.on('close', async () => {
+            clientEvents.removeAllListeners();
             this.onlineSockets.delete('dgclient');
-            this.handleSocketDisconnected();
 
+            try {
+                await this.stopGame(true);
+            } catch (error) {
+                console.error('Failed to stop game after client disconnected:', error);
+            }
+
+            this.handleSocketDisconnected();
             this.client = undefined;
 
+            this.events.emit('gameStopped');
             this.events.emit('clientDisconnected');
         });
 
-        // 监听强度上报事件
-        clientEvents.on('strengthChanged', (strength, _) => {
+        clientEvents.on('strengthChanged', () => {
             this.events.emit('strengthChanged', this.gameStrength);
         });
     }
@@ -186,47 +244,51 @@ export class CoyoteGameController {
         this.onlineSockets.add(socket.socketId);
 
         const socketEvents = this.eventStore.wrap(socket);
-
-        // 连接关闭事件
         socketEvents.on('close', () => {
-            socketEvents.removeAllListeners(); // 将会同时清除EventStore中的引用
+            socketEvents.removeAllListeners();
             this.onlineSockets.delete(socket.socketId);
             this.handleSocketDisconnected();
         });
     }
 
-    /**
-     * 更新游戏强度配置
-     * @param config 
-     */
     public async updateStrengthConfig(config: GameStrengthConfig): Promise<void> {
-        let deltaStrength = 0;
-        
-        if (simpleObjDiff(config, this.strengthConfig)) {
-            this.strengthConfig = config;
-            this.strengthConfigModified = Date.now();
+        const nextConfig = normalizeGameStrengthConfig(config);
 
-            this.events.emit('strengthConfigUpdated', this.strengthConfig);
+        if (!simpleObjDiff(nextConfig, this.strengthConfig)) {
+            return;
+        }
 
-            if (this.client) { // 客户端已连接时才更新强度
-                deltaStrength = this.strengthConfig.strength - this.client.strength.strength;
+        this.strengthConfig = nextConfig;
+        this.strengthConfigModified = Date.now();
+        const configCachePrefix = `coyoteLiveGameConfig:${this.clientId}:`;
+        CoyoteGameManager.instance.configCache.set(`${configCachePrefix}:strength`, this.strengthConfig);
+        await CoyoteGameConfigService.instance.set(this.clientId, PersistedGameConfigType.Strength, this.strengthConfig);
 
-                if (deltaStrength <= 5) {
-                    // 如果强度增加不超过5，则直接设置强度
-                    // 在GameApi连续加减时，这么做可以防止波形大量中断
-                    await this.setClientStrength(this.strengthConfig.strength);
-                } else {
-                    // 重启波形输出
-                    await this.restartGame();
-                }
+        this.events.emit('strengthConfigUpdated', this.strengthConfig);
+
+        if (!this.client || !this.started) {
+            return;
+        }
+
+        let shouldRestart = this.actionList.length > 0;
+        for (const channelId of this.getEnabledChannels()) {
+            const delta = this.strengthConfig[channelId].strength - this.getChannelClientStrength(channelId).strength;
+            if (delta > 5) {
+                shouldRestart = true;
+                break;
             }
         }
+
+        if (shouldRestart) {
+            await this.restartGame();
+            return;
+        }
+
+        await Promise.all(
+            this.getEnabledChannels().map((channelId) => this.setChannelStrength(channelId, this.strengthConfig[channelId].strength))
+        );
     }
 
-    /**
-     * 开始一个游戏动作
-     * @param action 
-     */
     public async startAction(action: AbstractGameAction): Promise<void> {
         this.latencyLogger.start('action ' + action.constructor.name);
 
@@ -240,132 +302,95 @@ export class CoyoteGameController {
             this.actionList.push(action);
         }
 
-        // 按优先级从大到小排序
         this.actionList.sort((a, b) => b.priority - a.priority);
 
         existsIndex = this.actionList.findIndex((a) => a.constructor === action.constructor);
-        if (existsIndex === 0) { // 立刻执行新的动作
-            // 重启波形输出
-            this.latencyLogger.log('startAction');
-            await this.restartGameTask();
+        if (existsIndex === 0 && this.started) {
+            await this.restartGame();
         }
     }
 
-    /**
-     * 强制结束一个游戏动作
-     * @param action 
-     */
     public async stopAction(action: AbstractGameAction): Promise<void> {
-        let existsIndex = this.actionList.findIndex((a) => a.constructor === action.constructor);
+        const existsIndex = this.actionList.findIndex((a) => a.constructor === action.constructor);
         if (existsIndex >= 0) {
             this.actionList.splice(existsIndex, 1);
 
-            if (existsIndex === 0) { // 移除的是当前执行的动作
-                // 重启波形输出
+            if (existsIndex === 0 && this.started) {
                 await this.restartGame();
             }
         }
     }
 
-    /**
-     * 游戏配置更新处理
-     * @param newGameConfig 
-     * @returns 
-     */
     private handleConfigUpdated(newGameConfig: MainGameConfig): void {
-        let diffKeys = simpleObjDiff(newGameConfig, this.gameConfig) as false | [keyof MainGameConfig];
-
+        const diffKeys = simpleObjDiff(newGameConfig, this.gameConfig);
         this.gameConfig = newGameConfig;
 
-        if (!diffKeys) return;
-
-        let shouldRestartGame = false;
-        let shouldRestartGameKeys = ['pulseId', 'pulseMode', 'pulseChangeInterval', 'strengthChangeInterval', 'enableBChannel', 'bChannelStrengthMultiplier'];
-        for (let key of diffKeys) {
-            if (shouldRestartGameKeys.includes(key)) {
-                shouldRestartGame = true;
-                break;
-            }
+        if (!diffKeys) {
+            return;
         }
 
-        if (diffKeys.includes('pulseId') || diffKeys.includes('pulseMode') || diffKeys.includes('pulseChangeInterval')) {
-            // 更新波形播放列表
-            let pulseList = typeof this.gameConfig.pulseId === 'string' ? [this.gameConfig.pulseId] : this.gameConfig.pulseId;
-            this.pulsePlayList = new PulsePlayList(pulseList, this.gameConfig.pulseMode, this.gameConfig.pulseChangeInterval);
-        }
+        this.pulsePlayLists = this.createPulsePlayLists();
 
-        if (shouldRestartGame) {
+        if (this.started) {
             this.restartGame().catch((error) => {
                 console.error('Failed to restart game:', error);
             });
         }
     }
 
-    /**
-     * 设置客户端强度
-     * @param strength 强度
-     * @returns 
-     */
-    public async setClientStrength(strength: number): Promise<void> {
+    private createPulsePlayLists(): Record<GameChannelId, PulsePlayList> {
+        return {
+            a: this.createPulsePlayList('a'),
+            b: this.createPulsePlayList('b'),
+        };
+    }
+
+    private createPulsePlayList(channelId: GameChannelId): PulsePlayList {
+        const channelConfig = this.getChannelConfig(channelId);
+        const pulseList = typeof channelConfig.pulseId === 'string' ? [channelConfig.pulseId] : channelConfig.pulseId;
+        return new PulsePlayList(pulseList, channelConfig.pulseMode, channelConfig.pulseChangeInterval);
+    }
+
+    public async setChannelStrength(channelId: GameChannelId, strength: number): Promise<void> {
         if (!this.client?.active) {
             return;
         }
 
-        await this.client.setStrength(Channel.A, strength);
-        if (this.gameConfig.enableBChannel) {
-            let bStrength = Math.min(strength * this.gameConfig.bChannelStrengthMultiplier, this.clientStrength.limit);
-            await this.client.setStrength(Channel.B, bStrength);
-        }
-
+        const channelStrength = this.getChannelClientStrength(channelId);
+        const targetStrength = Math.min(Math.max(0, strength), channelStrength.limit);
+        await this.client.setStrength(channelMap[channelId], targetStrength);
         this.strengthSetTime = Date.now();
     }
 
-    /**
-     * 运行输出任务
-     * @param ab 
-     * @param harvest 
-     * @returns 
-     */
-    private async runGameTask(ab: AbortController, harvest: () => void, round: number): Promise<void> {
+    private async runChannelTask(channelId: GameChannelId, ab: AbortController, harvest: () => void): Promise<void> {
         if (!this.client) {
-            this.stopGame().catch((error) => {
-                console.error('Failed to stop game:', error);
-            });
+            await this.stopGame();
             return;
         }
 
-        if (this.actionList.length > 0) {
-            // 执行游戏特殊动作
-            const currentAction = this.actionList[0];
-            this.latencyLogger.log('runGameTask: action ' + currentAction.constructor.name);
-            await currentAction.execute(ab, harvest, () => {
-                this.actionList.shift();
-            });
-            this.latencyLogger.log('runGameTask: action ' + currentAction.constructor.name + ' finished');
-            this.latencyLogger.finish();
+        const channelConfig = this.getChannelConfig(channelId);
+        if (!channelConfig.enabled) {
+            await this.setChannelStrength(channelId, 0);
             return;
         }
 
-        // 执行默认的输出任务
-        // 获取脉冲播放列表中的当前脉冲
-        let pulseId = this.pulsePlayList.getCurrentPulseId();
+        const pulseId = this.pulsePlayLists[channelId].getCurrentPulseId();
+        const strengthChangeInterval = channelConfig.strengthChangeInterval;
+        const outputTime = randomInt(strengthChangeInterval[0], strengthChangeInterval[1]) * 1000;
 
-        // 随机强度
-        const strengthChangeInterval = this.gameConfig.strengthChangeInterval;
-        let outputTime = randomInt(strengthChangeInterval[0], strengthChangeInterval[1]) * 1000;
-        let targetStrength = this.strengthConfig.strength + randomInt(0, this.strengthConfig.randomStrength);
-        targetStrength = Math.min(targetStrength, this.clientStrength.limit);
+        let targetStrength = this.strengthConfig[channelId].strength + randomInt(0, this.strengthConfig[channelId].randomStrength);
+        targetStrength = Math.min(targetStrength, this.getChannelClientStrength(channelId).limit);
 
-        let currentStrength = this.client.strength.strength;
-        if (targetStrength > currentStrength) { // 递增强度
-            let setStrengthInterval = setInterval(() => {
-                if (ab.signal.aborted) { // 任务被中断
+        let currentStrength = this.getChannelClientStrength(channelId).strength;
+        if (targetStrength > currentStrength) {
+            const setStrengthInterval = setInterval(() => {
+                if (ab.signal.aborted) {
                     clearInterval(setStrengthInterval);
                     return;
                 }
 
-                this.setClientStrength(currentStrength).catch((error) => {
-                    console.error('Failed to set strength:', error);
+                this.setChannelStrength(channelId, currentStrength).catch((error) => {
+                    console.error(`Failed to set ${channelId.toUpperCase()} channel strength:`, error);
                 });
 
                 if (currentStrength >= targetStrength) {
@@ -375,96 +400,165 @@ export class CoyoteGameController {
                 currentStrength = Math.min(currentStrength + 2, targetStrength);
             }, 200);
         } else {
-            this.setClientStrength(targetStrength).catch((error) => {
-                console.error('Failed to set strength:', error);
+            this.setChannelStrength(channelId, targetStrength).catch((error) => {
+                console.error(`Failed to set ${channelId.toUpperCase()} channel strength:`, error);
             });
         }
 
         harvest();
 
-        // 输出脉冲，直到下次随机强度时间
-        await this.client.outputPulse(pulseId, outputTime, {
+        await this.client.outputPulse(channelMap[channelId], pulseId, outputTime, {
             abortController: ab,
-            bChannel: this.gameConfig.enableBChannel,
-            customPulseList: this.customPulseList,  // 自定义波形列表
+            customPulseList: this.customPulseList,
         });
     }
 
-    /**
-     * 开启游戏
-     * @param ignoreEvent 
-     */
-    public async startGame(ignoreEvent = false): Promise<void> {
-        if (!this.client) {
-            return;
-        }
+    private async startDefaultChannelTasks(): Promise<void> {
+        await this.stopDefaultChannelTasks();
 
-        if (!this.gameTask) {
-            // 初始化强度和脉冲
-            await this.client.reset();
-
-            let initStrength = this.strengthConfig.strength;
-            initStrength = Math.min(initStrength, this.clientStrength.limit); // 限制初始强度不超过限制
-
-            // 启动游戏任务
-            this.gameTask = new Task((ab, harvest, round) => this.runGameTask(ab, harvest, round));
-            this.gameTask.on('error', (error) => {
-                console.error('Game task error:', error);
+        for (const channelId of this.getEnabledChannels()) {
+            const task = new Task((ab, harvest) => this.runChannelTask(channelId, ab, harvest));
+            task.on('error', (error) => {
+                console.error(`Channel ${channelId.toUpperCase()} task error:`, error);
             });
-
-            if (!ignoreEvent) {
-                this.events.emit('gameStarted');
-            }
+            this.channelTasks[channelId] = task;
         }
     }
 
-    /**
-     * 停止或暂停游戏
-     * @param ignoreEvent 
-     */
+    private async stopDefaultChannelTasks(): Promise<void> {
+        const taskList = Object.values(this.channelTasks).filter(Boolean) as Task[];
+        this.channelTasks = {};
+
+        for (const task of taskList) {
+            await task.abort();
+        }
+    }
+
+    private startActionRunner(): void {
+        if (!this.started || !this.actionList.length || this.actionRunner) {
+            return;
+        }
+
+        const currentAction = this.actionList[0];
+        const actionAb = new AbortController();
+        const harvest = () => {
+            if (actionAb.signal.aborted) {
+                throw new TaskAbortedError();
+            }
+        };
+
+        this.actionAbortController = actionAb;
+
+        const runner = currentAction.execute(actionAb, harvest, () => {
+            this.actionList.shift();
+        }).then(() => {
+            harvest();
+        }).catch((error) => {
+            if (!(error instanceof TaskAbortedError)) {
+                console.error('Action runner error:', error);
+            }
+        }).finally(() => {
+            if (this.actionAbortController === actionAb) {
+                this.actionAbortController = null;
+            }
+
+            if (this.actionRunner === runner) {
+                this.actionRunner = null;
+            }
+
+            if (!this.started || actionAb.signal.aborted) {
+                return;
+            }
+
+            if (this.actionList.length > 0) {
+                this.startActionRunner();
+            } else {
+                this.startDefaultChannelTasks().catch((error) => {
+                    console.error('Failed to restart default channel tasks:', error);
+                });
+            }
+        });
+
+        this.actionRunner = runner;
+    }
+
+    private async stopActionRunner(): Promise<void> {
+        if (this.actionAbortController) {
+            this.actionAbortController.abort();
+        }
+
+        if (this.actionRunner) {
+            await this.actionRunner;
+        }
+
+        this.actionAbortController = null;
+        this.actionRunner = null;
+    }
+
+    private async startRunners(): Promise<void> {
+        if (!this.started || !this.client) {
+            return;
+        }
+
+        if (this.actionList.length > 0) {
+            this.startActionRunner();
+            return;
+        }
+
+        await this.startDefaultChannelTasks();
+    }
+
+    private async stopRunners(): Promise<void> {
+        await this.stopActionRunner();
+        await this.stopDefaultChannelTasks();
+    }
+
+    public async startGame(ignoreEvent = false): Promise<void> {
+        if (!this.client || this.started) {
+            return;
+        }
+
+        await this.client.reset();
+        await Promise.all(gameChannelIdList.map((channelId) => this.setChannelStrength(channelId, 0)));
+        this.resetTempStrength();
+
+        this.started = true;
+        await this.startRunners();
+
+        if (!ignoreEvent) {
+            this.events.emit('gameStarted');
+        }
+    }
+
     public async stopGame(ignoreEvent = false): Promise<void> {
-        if (this.gameTask) {
-            await this.gameTask.abort();
-            this.gameTask = null;
-
-            if (!ignoreEvent) {
-                this.events.emit('gameStopped');
-            }
-
-            await this.client?.reset();
-        }
-    }
-
-    /**
-     * 重启游戏
-     * 
-     * 每次更新配置后都需要重启游戏
-     */
-    public async restartGame(): Promise<void> {
-        if (!this.client) {
+        if (!this.started && !this.actionRunner && Object.keys(this.channelTasks).length === 0) {
             return;
         }
 
-        if (this.running) {
-            await this.stopGame(true);
-            await this.startGame(true);
-            this.latencyLogger.finish();
-        }
-    }
+        this.started = false;
+        await this.stopRunners();
+        this.resetTempStrength();
 
-    /**
-     * 仅重启游戏任务，用于低延迟的强度调整
-     */
-    public async restartGameTask(): Promise<void> {
-        if (!this.client) {
-            return;
-        }
-
-        if (this.running && this.gameTask) {
+        if (this.client?.active) {
+            await Promise.all(gameChannelIdList.map((channelId) => this.setChannelStrength(channelId, 0)));
             await this.client.reset();
-            this.latencyLogger.log('resetClient');
-            this.gameTask.restart();
         }
+
+        if (!ignoreEvent) {
+            this.events.emit('gameStopped');
+        }
+    }
+
+    public async restartGame(): Promise<void> {
+        if (!this.client || !this.started) {
+            return;
+        }
+
+        await this.stopRunners();
+        await this.client.reset();
+        this.pulsePlayLists = this.createPulsePlayLists();
+        await this.startRunners();
+        this.latencyLogger.finish();
     }
 
     public handleSocketDisconnected(): void {
@@ -476,17 +570,14 @@ export class CoyoteGameController {
     }
 
     public async destroy(): Promise<void> {
-        if (this.gameTask) {
-            await this.gameTask.stop();
-        }
+        this.started = false;
+        await this.stopRunners();
 
         this.events.emit('close');
 
-        // 保存配置, 以便下次连接时恢复
         const configCachePrefix = `coyoteLiveGameConfig:${this.clientId}:`;
-        const configCache  = CoyoteGameManager.instance.configCache;
+        const configCache = CoyoteGameManager.instance.configCache;
         configCache.set(`${configCachePrefix}:strength`, this.strengthConfig);
-
 
         this.eventStore.removeAllListeners();
         this.events.removeAllListeners();

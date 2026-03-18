@@ -202,7 +202,7 @@ export class WebWSClient {
             event: 'gameConfigUpdated',
             data: {
                 type: GameConfigType.MainGame,
-                config: gameConfig,
+                config: gameConfig?.toMainGameConfig() ?? null,
             },
         });
 
@@ -288,7 +288,10 @@ export class WebWSClient {
             }
         }
 
-        await this.gameInstance.updateStrengthConfig(message.config);
+        await this.gameInstance.updateStrengthConfig(strengthConfig);
+        await this.sendResponse(message.requestId, {
+            status: 1,
+        });
     }
 
     private async handleUpdateGameConfig(message: any) {
@@ -304,7 +307,10 @@ export class WebWSClient {
             case GameConfigType.MainGame:
                 try {
                     const config = MainGameConfigSchema.parse(message.config);
-                    await GameModel.update(this.ctx.database, this.clientId, config);
+                    await GameModel.updateConfig(this.ctx.database, this.clientId, config);
+                    await this.sendResponse(message.requestId, {
+                        status: 1,
+                    });
                 } catch (error: any) {
                     if (error instanceof z.ZodError) {
                         await this.sendResponse(message.requestId, {
@@ -326,6 +332,9 @@ export class WebWSClient {
                 try {
                     const config = GameCustomPulseConfigSchema.parse(message.config);
                     await CustomPulseModel.update(this.ctx.database, this.clientId, config.customPulseList);
+                    await this.sendResponse(message.requestId, {
+                        status: 1,
+                    });
                 } catch (error: any) {
                     if (error instanceof z.ZodError) {
                         await this.sendResponse(message.requestId, {

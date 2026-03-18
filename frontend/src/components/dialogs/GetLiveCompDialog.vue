@@ -21,6 +21,7 @@ const visible = defineModel('visible');
 
 const state = reactive({
   theme: 'default',
+  displayMode: 'dual' as 'dual' | 'a' | 'b',
   chartParams: {} as Record<string, string>,
   themeLoading: false,
 });
@@ -63,11 +64,27 @@ const chartParamsDef = computed(() => {
   return themeOptions.value.find((theme) => theme.value === state.theme)?.params ?? [];
 });
 
+const displayModeOptions = [
+  { label: '双通道', value: 'dual' },
+  { label: '仅A通道', value: 'a' },
+  { label: '仅B通道', value: 'b' },
+];
+
 const viewerUrl = computed(() => {
   const baseUrl = location.origin + import.meta.env.BASE_URL.replace(/\/$/, '');
   if (props.clientId) {
     const theme = state.theme === 'default' ? '' : state.theme;
-    let url = `${baseUrl}/viewer.html?clientId=${props.clientId}#/${theme}`;
+    const viewerParams = new URLSearchParams({
+      clientId: props.clientId,
+    });
+    if (state.displayMode === 'dual') {
+      viewerParams.set('layout', 'dual');
+    } else {
+      viewerParams.set('layout', 'single');
+      viewerParams.set('channel', state.displayMode);
+    }
+
+    let url = `${baseUrl}/viewer.html?${viewerParams.toString()}#/${theme}`;
     if (Object.keys(state.chartParams).length) {
       url += '?' + new URLSearchParams(buildChartParams(state.chartParams)).toString();
     }
@@ -94,6 +111,16 @@ const copyUrl = () => {
       <div v-if="props.clientId">
         <!-- Preview -->
         <iframe :src="viewerUrl" class="w-full h-[20rem] mb-2"></iframe>
+        <div class="flex flex-col items-start mt-4">
+          <span class="block font-semibold mb-2">显示模式：</span>
+          <Select
+            v-model="state.displayMode"
+            :options="displayModeOptions"
+            optionLabel="label"
+            optionValue="value"
+            class="w-full"
+          ></Select>
+        </div>
         <div class="flex flex-col items-start mt-4">
           <span class="block font-semibold mb-2">选择主题：</span>
           <Select

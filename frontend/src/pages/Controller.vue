@@ -3,10 +3,17 @@ import { useToast } from 'primevue/usetoast';
 import Toast from 'primevue/toast';
 import ConfirmDialog from 'primevue/confirmdialog';
 import StatusChart from '../charts/Circle1.vue';
-
 import SelectButton from 'primevue/selectbutton';
 
-import { GameConfigType, GameStrengthConfig, MainGameConfig, PulseItemResponse, PulsePlayMode, SocketApi } from '../apis/socketApi';
+import {
+  GameChannelId,
+  GameConfigType,
+  GameStrengthConfig,
+  MainGameConfig,
+  PulseItemResponse,
+  PulsePlayMode,
+  SocketApi
+} from '../apis/socketApi';
 import { ClientConnectUrlInfo, ServerInfoResData, webApi } from '../apis/webApi';
 import { handleApiResponse } from '../utils/response';
 import { simpleObjDiff } from '../utils/utils';
@@ -19,23 +26,26 @@ import { useClientsStore } from '../stores/ClientsStore';
 import ConnectToSavedClientsDialog from '../components/dialogs/ConnectToSavedClientsDialog.vue';
 import { useRemoteNotificationStore } from '../stores/RemoteNotificationStore';
 
-export interface ControllerPageState {
-  controllerPage: 'strength' | 'pulse' | 'game';
-
+export interface ChannelControlState {
+  enabled: boolean;
   strengthVal: number;
   randomStrengthVal: number;
   strengthLimit: number;
-  fireStrengthLimit: number;
   tempStrength: number;
+  actualStrength: number;
   randomFreq: number[];
-  bChannelEnabled: boolean;
-  bChannelMultiple: number;
-  pulseList: PulseItemInfo[] | null;
-  customPulseList: PulseItemInfo[];
+  fireStrengthLimit: number;
   selectPulseIds: string[];
   firePulseId: string;
   pulseMode: PulsePlayMode;
   pulseChangeInterval: number;
+}
+
+export interface ControllerPageState {
+  controllerPage: 'strength' | 'pulse' | 'game';
+  channels: Record<GameChannelId, ChannelControlState>;
+  pulseList: PulseItemInfo[] | null;
+  customPulseList: PulseItemInfo[];
   newClientName: string;
   clientId: string;
   clientWsUrlList: ClientConnectUrlInfo[] | null;
@@ -51,41 +61,36 @@ export interface ControllerPageState {
   showConnectToSavedClientsDialog: boolean;
 }
 
-const state = reactive<ControllerPageState>({
-  controllerPage: 'strength',
-
+const createChannelState = (enabled: boolean): ChannelControlState => ({
+  enabled,
   strengthVal: 5,
   randomStrengthVal: 5,
-  fireStrengthLimit: 30,
   strengthLimit: 20,
-
   tempStrength: 0,
-
-  randomFreq: [5, 10],
-
-  bChannelEnabled: false,
-  bChannelMultiple: 1,
-
-  pulseList: null as PulseItemInfo[] | null,
-  customPulseList: [] as PulseItemInfo[],
+  actualStrength: 0,
+  randomFreq: [15, 30],
+  fireStrengthLimit: 30,
   selectPulseIds: [''],
   firePulseId: '',
-
   pulseMode: 'single',
   pulseChangeInterval: 60,
+});
 
+const state = reactive<ControllerPageState>({
+  controllerPage: 'strength',
+  channels: {
+    a: createChannelState(true),
+    b: createChannelState(false),
+  },
+  pulseList: null,
+  customPulseList: [],
   newClientName: '',
   clientId: '',
-  clientWsUrlList: null as ClientConnectUrlInfo[] | null,
-
-  clientStatus: 'init' as 'init' | 'waiting' | 'connected',
-
+  clientWsUrlList: null,
+  clientStatus: 'init',
   apiBaseHttpUrl: '',
-
-  connectorType: ConnectorType.DGLAB as ConnectorType,
-
+  connectorType: ConnectorType.DGLAB,
   gameStarted: false,
-
   showConnectionDialog: false,
   showClientInfoDialog: false,
   showLiveCompDialog: false,
@@ -94,8 +99,9 @@ const state = reactive<ControllerPageState>({
   showConnectToSavedClientsDialog: false,
 });
 
-const router = useRouter();
+const channelIdList: GameChannelId[] = ['a', 'b'];
 
+const router = useRouter();
 const coyoteLocalRef = ref<InstanceType<typeof CoyoteLocalConnectService> | null>(null);
 
 const controllerPageTabs = [
@@ -108,54 +114,80 @@ watch(() => state.controllerPage, (newVal) => {
   router.push({ path: newVal });
 });
 
-// 在收到服务器的配置后设置为true，防止触发watch
 let receivedConfig = false;
+
+const cloneConfig = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
 let oldGameConfig: MainGameConfig | null = null;
 const gameConfig = computed<MainGameConfig>({
-  get: () => {
-    return {
-      fireStrengthLimit: state.fireStrengthLimit,
-      strengthChangeInterval: state.randomFreq,
-      enableBChannel: state.bChannelEnabled,
-      bChannelStrengthMultiplier: state.bChannelMultiple,
-      pulseId: state.selectPulseIds.length === 1 ? state.selectPulseIds[0] : state.selectPulseIds,
-      firePulseId: state.firePulseId === '' ? null : state.firePulseId,
-      pulseMode: state.pulseMode,
-      pulseChangeInterval: state.pulseChangeInterval,
-    } as MainGameConfig;
-  },
+  get: () => ({
+    channels: {
+      a: {
+        enabled: true,
+        strengthChangeInterval: [...state.channels.a.randomFreq] as [number, number],
+        fireStrengthLimit: state.channels.a.fireStrengthLimit,
+        pulseId: state.channels.a.selectPulseIds.length === 1 ? state.channels.a.selectPulseIds[0] : state.channels.a.selectPulseIds,
+        firePulseId: state.channels.a.firePulseId === '' ? null : state.channels.a.firePulseId,
+        pulseMode: state.channels.a.pulseMode,
+        pulseChangeInterval: state.channels.a.pulseChangeInterval,
+      },
+      b: {
+        enabled: state.channels.b.enabled,
+        strengthChangeInterval: [...state.channels.b.randomFreq] as [number, number],
+        fireStrengthLimit: state.channels.b.fireStrengthLimit,
+        pulseId: state.channels.b.selectPulseIds.length === 1 ? state.channels.b.selectPulseIds[0] : state.channels.b.selectPulseIds,
+        firePulseId: state.channels.b.firePulseId === '' ? null : state.channels.b.firePulseId,
+        pulseMode: state.channels.b.pulseMode,
+        pulseChangeInterval: state.channels.b.pulseChangeInterval,
+      },
+    },
+  }),
   set: (value) => {
-    state.fireStrengthLimit = value.fireStrengthLimit;
-    state.randomFreq = value.strengthChangeInterval;
-    state.bChannelEnabled = value.enableBChannel;
-    state.bChannelMultiple = value.bChannelStrengthMultiplier;
-    state.selectPulseIds = typeof value.pulseId === 'string' ? [value.pulseId] : value.pulseId || [''];
-    state.firePulseId = value.firePulseId || '';
-    state.pulseMode = value.pulseMode;
-    state.pulseChangeInterval = value.pulseChangeInterval;
+    channelIdList.forEach((channelId) => {
+      const channelConfig = value.channels[channelId];
+      const channelState = state.channels[channelId];
+      channelState.enabled = channelId === 'a' ? true : channelConfig.enabled;
+      channelState.randomFreq = [...channelConfig.strengthChangeInterval];
+      channelState.fireStrengthLimit = channelConfig.fireStrengthLimit;
+      channelState.selectPulseIds = typeof channelConfig.pulseId === 'string' ? [channelConfig.pulseId] : channelConfig.pulseId || [''];
+      channelState.firePulseId = channelConfig.firePulseId || '';
+      channelState.pulseMode = channelConfig.pulseMode;
+      channelState.pulseChangeInterval = channelConfig.pulseChangeInterval;
+    });
   }
 });
 
 let oldStrengthConfig: GameStrengthConfig | null = null;
 const strengthConfig = computed<GameStrengthConfig>({
-  get: () => {
-    return {
-      strength: state.strengthVal,
-      randomStrength: state.randomStrengthVal,
-    } as GameStrengthConfig;
-  },
+  get: () => ({
+    a: {
+      strength: state.channels.a.strengthVal,
+      randomStrength: state.channels.a.randomStrengthVal,
+    },
+    b: {
+      strength: state.channels.b.strengthVal,
+      randomStrength: state.channels.b.randomStrengthVal,
+    },
+  }),
   set: (value) => {
-    state.strengthVal = value.strength;
-    state.randomStrengthVal = value.randomStrength;
+    channelIdList.forEach((channelId) => {
+      state.channels[channelId].strengthVal = value[channelId].strength;
+      state.channels[channelId].randomStrengthVal = value[channelId].randomStrength;
+    });
   }
 });
 
-const chartVal = computed(() => ({
-  valLow: Math.min(state.strengthVal + state.tempStrength, state.strengthLimit),
-  valHigh: Math.min(state.strengthVal + state.tempStrength + state.randomStrengthVal, state.strengthLimit),
-  valLimit: state.strengthLimit,
-}));
+const getChartVal = (channelId: GameChannelId) => {
+  const channelState = state.channels[channelId];
+  return {
+    valLow: Math.min(channelState.strengthVal + channelState.tempStrength, channelState.strengthLimit),
+    valHigh: Math.min(
+      channelState.strengthVal + channelState.tempStrength + channelState.randomStrengthVal,
+      channelState.strengthLimit,
+    ),
+    valLimit: channelState.strengthLimit,
+  };
+};
 
 const toast = useToast();
 const confirm = useConfirm();
@@ -172,8 +204,7 @@ let dgClientConnected = false;
 
 const initServerInfo = async () => {
   try {
-    let serverInfoRes = await webApi.getServerInfo();
-
+    const serverInfoRes = await webApi.getServerInfo();
     handleApiResponse(serverInfoRes);
 
     serverInfo = serverInfoRes!;
@@ -191,36 +222,26 @@ const initWebSocket = async () => {
   wsClient = new SocketApi(serverInfo.server.wsUrl);
 
   wsClient.on('open', () => {
-    // 此事件在重连时也会触发
-    console.log('WebSocket connected or re-connected');
-    if (state.clientId) { // 已有clientId，直接绑定
+    if (state.clientId) {
       bindClient();
     }
   });
 
   wsClient.on('pulseListUpdated', (data: PulseItemResponse[]) => {
-    console.log('Pulse list updated:', data);
     state.pulseList = data;
   });
 
   wsClient.on('clientConnected', () => {
-    console.log('DG-Lab client connected');
-
-    state.showConnectionDialog = false; // 关闭连接对话框
+    state.showConnectionDialog = false;
     state.clientStatus = 'connected';
     dgClientConnected = true;
-
     handleClientConnected();
-
     toast.add({ severity: 'success', summary: '客户端连接成功', detail: '已连接到客户端', life: 3000 });
   });
 
   wsClient.on('clientDisconnected', () => {
-    console.log('DG-Lab client disconnected');
-
     state.clientStatus = 'waiting';
     state.gameStarted = false;
-
     dgClientConnected = false;
   });
 
@@ -233,20 +254,19 @@ const initWebSocket = async () => {
   });
 
   wsClient.on('strengthChanged', (strength) => {
-    state.strengthLimit = strength.limit;
-    state.tempStrength = strength.tempStrength;
+    channelIdList.forEach((channelId) => {
+      state.channels[channelId].strengthLimit = strength[channelId].limit;
+      state.channels[channelId].tempStrength = strength[channelId].tempStrength;
+      state.channels[channelId].actualStrength = strength[channelId].strength;
+    });
   });
 
   wsClient.on('strengthConfigUpdated', (config) => {
     if (state.showConfigSavePrompt) {
-      // 当前有配置未保存，不更新配置，只替换旧配置
-      oldStrengthConfig = config;
+      oldStrengthConfig = cloneConfig(config);
     } else {
-      // 覆盖本地配置
       strengthConfig.value = config;
-      oldStrengthConfig = config;
-
-      // 屏蔽保存提示
+      oldStrengthConfig = cloneConfig(config);
       receivedConfig = true;
       nextTick(() => {
         receivedConfig = false;
@@ -256,14 +276,10 @@ const initWebSocket = async () => {
 
   wsClient.on('mainGameConfigUpdated', (config) => {
     if (state.showConfigSavePrompt) {
-      // 当前有配置未保存，不更新配置，只替换旧配置
-      oldGameConfig = config;
+      oldGameConfig = cloneConfig(config);
     } else {
-      // 覆盖本地配置
       gameConfig.value = config;
-      oldGameConfig = config;
-
-      // 屏蔽保存提示
+      oldGameConfig = cloneConfig(config);
       receivedConfig = true;
       nextTick(() => {
         receivedConfig = false;
@@ -277,7 +293,6 @@ const initWebSocket = async () => {
 
   wsClient.on('remoteNotification', (notification) => {
     if (notification.ignoreId && remoteNotificationStore.isIgnored(notification.ignoreId)) {
-      // 已忽略的通知不显示
       return;
     }
 
@@ -297,10 +312,9 @@ const initWebSocket = async () => {
 
 const initClientConnection = async () => {
   try {
-    let res = await webApi.getClientConnectInfo();
+    const res = await webApi.getClientConnectInfo();
     handleApiResponse(res);
     state.clientId = res!.clientId;
-
     bindClient();
   } catch (error: any) {
     console.error('Cannot get client ws url list:', error);
@@ -309,12 +323,11 @@ const initClientConnection = async () => {
 };
 
 const bindClient = async () => {
-  if (!state.clientId) return;
-  if (!wsClient?.isConnected) return;
+  if (!state.clientId || !wsClient?.isConnected) return;
 
   try {
     state.clientStatus = 'waiting';
-    let res = await wsClient.bindClient(state.clientId);
+    const res = await wsClient.bindClient(state.clientId);
     handleApiResponse(res);
   } catch (error: any) {
     console.error('Cannot bind client:', error);
@@ -323,17 +336,14 @@ const bindClient = async () => {
 };
 
 const handleClientConnected = () => {
-  if (state.clientId) {
-    const clientInfo = clientsStore.getClientInfo(state.clientId);
-    if (!clientInfo) {
-      // 初次连接时保存客户端
-      state.newClientName = new Date().toLocaleString() + ' 连接的设备';
-      state.showClientNameDialog = true;
+  if (!state.clientId) return;
 
-    } else {
-      // 更新连接时间
-      clientsStore.updateClientConnectTime(state.clientId);
-    }
+  const clientInfo = clientsStore.getClientInfo(state.clientId);
+  if (!clientInfo) {
+    state.newClientName = new Date().toLocaleString() + ' 连接的设备';
+    state.showClientNameDialog = true;
+  } else {
+    clientsStore.updateClientConnectTime(state.clientId);
   }
 };
 
@@ -343,7 +353,6 @@ const handleSaveClientConnect = async (clientName: string) => {
 
 const showConnectionDialog = () => {
   state.showConnectionDialog = true;
-
   if (!state.clientId) {
     initClientConnection();
   }
@@ -351,7 +360,6 @@ const showConnectionDialog = () => {
 
 const showLiveCompDialog = () => {
   state.showLiveCompDialog = true;
-
   if (!state.clientId) {
     initClientConnection();
   }
@@ -363,25 +371,22 @@ const handleResetClientId = () => {
 
 const handleConnSetClientId = (clientId: string) => {
   state.clientId = clientId;
-
   bindClient();
-
-  // 关闭连接对话框
   state.showConnectionDialog = false;
 };
 
 const postConfig = async () => {
   try {
     if (simpleObjDiff(oldStrengthConfig, strengthConfig.value)) {
-      let res = await wsClient.updateStrengthConfig(strengthConfig.value);
+      const res = await wsClient.updateStrengthConfig(strengthConfig.value);
       handleApiResponse(res);
-      oldStrengthConfig = strengthConfig.value;
+      oldStrengthConfig = cloneConfig(strengthConfig.value);
     }
 
     if (simpleObjDiff(oldGameConfig, gameConfig.value)) {
-      let res = await wsClient.updateConfig(GameConfigType.MainGame, gameConfig.value);
+      const res = await wsClient.updateConfig(GameConfigType.MainGame, gameConfig.value);
       handleApiResponse(res);
-      oldGameConfig = gameConfig.value;
+      oldGameConfig = cloneConfig(gameConfig.value);
     }
 
     toast.add({ severity: 'success', summary: '保存成功', detail: '游戏配置已保存', life: 3000 });
@@ -392,7 +397,7 @@ const postConfig = async () => {
 
 const postCustomPulseConfig = async () => {
   try {
-    let res = await wsClient.updateConfig(GameConfigType.CustomPulse, {
+    const res = await wsClient.updateConfig(GameConfigType.CustomPulse, {
       customPulseList: state.customPulseList,
     });
     handleApiResponse(res);
@@ -409,7 +414,7 @@ const handleStartGame = async () => {
   }
 
   try {
-    let res = await wsClient.startGame();
+    const res = await wsClient.startGame();
     handleApiResponse(res);
   } catch (error: any) {
     console.error('Cannot start game:', error);
@@ -423,7 +428,7 @@ const handleStopGame = async () => {
   }
 
   try {
-    let res = await wsClient.stopGame();
+    const res = await wsClient.stopGame();
     handleApiResponse(res);
   } catch (error: any) {
     console.error('Cannot pause game:', error);
@@ -437,14 +442,13 @@ const handleSaveConfig = () => {
 
 const handleCancelSaveConfig = () => {
   if (oldGameConfig) {
-    gameConfig.value = oldGameConfig;
+    gameConfig.value = cloneConfig(oldGameConfig);
   }
   if (oldStrengthConfig) {
-    strengthConfig.value = oldStrengthConfig;
+    strengthConfig.value = cloneConfig(oldStrengthConfig);
   }
 
   state.showConfigSavePrompt = false;
-
   receivedConfig = true;
   nextTick(() => {
     receivedConfig = false;
@@ -459,9 +463,15 @@ const handleStartDebugConnect = () => {
   coyoteLocalRef.value?.startLocalDebugConnect();
 };
 
+const normalizeSinglePulseMode = (channelId: GameChannelId) => {
+  const channelState = state.channels[channelId];
+  if (channelState.pulseMode === 'single' && channelState.selectPulseIds.length > 1) {
+    channelState.selectPulseIds = [channelState.selectPulseIds[0]];
+  }
+};
+
 onMounted(async () => {
   if (clientsStore.clientList.length > 0) {
-    // 有保存的客户端，显示连接对话框
     state.showConnectToSavedClientsDialog = true;
   }
 
@@ -469,19 +479,16 @@ onMounted(async () => {
   await initWebSocket();
 });
 
-watch(() => state.pulseMode, (newVal) => {
-  if (newVal === 'single' && state.selectPulseIds.length > 1) { // 单波形模式下只保留第一个波形
-    state.selectPulseIds = [state.selectPulseIds[0]];
-  }
-});
+watch(() => state.channels.a.pulseMode, () => normalizeSinglePulseMode('a'));
+watch(() => state.channels.b.pulseMode, () => normalizeSinglePulseMode('b'));
 
 watch([gameConfig, strengthConfig], () => {
-  if (receivedConfig) { // 收到服务器配置后不触发保存提示
+  if (receivedConfig) {
     receivedConfig = false;
     return;
   }
 
-  state.showConfigSavePrompt = true; // 显示保存提示
+  state.showConfigSavePrompt = true;
 }, { deep: true });
 </script>
 
@@ -495,9 +502,25 @@ watch([gameConfig, strengthConfig], () => {
     <ConfirmDialog></ConfirmDialog>
     <CoyoteLocalConnectService :state="state" ref="coyoteLocalRef"></CoyoteLocalConnectService>
     <div class="flex flex-col lg:flex-row items-center lg:items-start gap-8">
-      <div class="flex">
-        <StatusChart v-model:val-low="chartVal.valLow" v-model:val-high="chartVal.valHigh"
-          :val-limit="chartVal.valLimit" :running="state.gameStarted" readonly />
+      <div class="flex flex-wrap justify-center gap-4">
+        <div
+          v-for="channelId in channelIdList"
+          :key="channelId"
+          class="flex flex-col items-center gap-2"
+          :class="{ 'opacity-60': channelId === 'b' && !state.channels.b.enabled }"
+        >
+          <span class="text-sm font-bold tracking-wide">
+            {{ channelId.toUpperCase() }}通道
+          </span>
+          <StatusChart
+            :val-low="getChartVal(channelId).valLow"
+            :val-high="getChartVal(channelId).valHigh"
+            :val-limit="getChartVal(channelId).valLimit"
+            :real-strength="state.channels[channelId].actualStrength"
+            :running="state.gameStarted"
+            readonly
+          />
+        </div>
       </div>
 
       <Card class="controller-panel flex-grow-1 flex-shrink-1 w-full">
@@ -598,7 +621,7 @@ body {
 
 .page-container {
   margin-top: 2rem;
-  margin-bottom: 6rem; // 为底部toast留出空间
+  margin-bottom: 6rem;
   margin-left: auto;
   margin-right: auto;
   padding: 0 1rem;

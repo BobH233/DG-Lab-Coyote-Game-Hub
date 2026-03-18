@@ -20,7 +20,6 @@ export interface StrengthInfo {
 
 export interface OutputPulseOptions {
     abortController?: AbortController;
-    bChannel?: boolean;
     customPulseList?: DGLabPulseInfo[];
     onTimeEnd?: () => void;
 }
@@ -248,7 +247,7 @@ export class DGLabWSClient {
         return ret;
     }
 
-    public async outputPulse(pulseId: string, time: number, options: OutputPulseOptions = {}) {
+    public async outputPulse(channel: Channel, pulseId: string, time: number, options: OutputPulseOptions = {}) {
         // 输出脉冲，直到下次随机强度时间
         let totalDuration = 0;
         const pulseService = DGLabPulseService.instance;
@@ -264,10 +263,7 @@ export class DGLabWSClient {
         for (let i = 0; i < 50; i++) {
             let [pulseData, pulseDuration] = pulseService.getPulseHexData(currentPulseInfo);
 
-            await this.sendPulse(Channel.A, pulseData);
-            if (options.bChannel) {
-                await this.sendPulse(Channel.B, pulseData);
-            }
+            await this.sendPulse(channel, pulseData);
 
             harvest();
 

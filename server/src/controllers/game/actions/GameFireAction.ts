@@ -1,117 +1,194 @@
+import { Channel } from "#app/types/dg.js";
+import { GameChannelId, gameChannelIdList } from "#app/types/game.js";
 import { AbstractGameAction } from "./AbstractGameAction.js";
+
+export type GameFireActionChannelConfig = {
+    strength?: number;
+    pulseId?: string;
+    enabled?: boolean;
+};
 
 export type GameFireActionConfig = {
     /** 一键开火的强度 */
-    strength: number;
+    strength?: number;
     /** 一键开火的持续时间（毫秒） */
     time: number;
-    /** 指定波形ID */
+    /** 指定所有通道使用相同波形ID */
     pulseId?: string;
+    /** 按通道覆盖一键开火参数 */
+    channels?: Partial<Record<GameChannelId, GameFireActionChannelConfig>>;
     /** 重复操作的模式 */
     updateMode: "replace" | "append";
 };
 
-export const SAFE_FIRE_STRENGTH = 30; // 一键开火首次强度
-export const FIRE_BOOST_STRENGTH = 5; // 一键开火每次增加的强度
+type FireChannelState = {
+    enabled: boolean;
+    fireStrength: number;
+    currentFireStrength: number;
+    firePulseId: string;
+};
+
+export const SAFE_FIRE_STRENGTH = 30;
+export const FIRE_BOOST_STRENGTH = 5;
 
 export const FIRE_MAX_STRENGTH = 200;
 export const FIRE_MAX_DURATION = 300000;
+
+const channelMap: Record<GameChannelId, Channel> = {
+    a: Channel.A,
+    b: Channel.B,
+};
 
 export class GameFireAction extends AbstractGameAction<GameFireActionConfig> {
     public static readonly actionId = "fire";
     public static readonly actionName = "一键开火";
 
-    /** 一键开火强度 */
-    public fireStrength: number = 0;
-
     /** 一键开火结束时间 */
     public fireEndTimestamp: number = 0;
 
-    /** 一键开火波形（可能是临时的） */
-    public firePulseId: string = '';
-
-    /** 当前一键开火的强度 */
-    public currentFireStrength: number = 0;
+    private fireChannels: Record<GameChannelId, FireChannelState> = {
+        a: {
+            enabled: false,
+            fireStrength: 0,
+            currentFireStrength: 0,
+            firePulseId: '',
+        },
+        b: {
+            enabled: false,
+            fireStrength: 0,
+            currentFireStrength: 0,
+            firePulseId: '',
+        },
+    };
 
     initialize() {
-        this.fireStrength = Math.min(this.config.strength, this.game.gameConfig.fireStrengthLimit || FIRE_MAX_STRENGTH);
         this.fireEndTimestamp = Date.now() + Math.min(this.config.time, FIRE_MAX_DURATION);
-        this.firePulseId = this.config.pulseId || this.game.gameConfig.firePulseId || this.game.pulsePlayList.getCurrentPulseId();
+        this.refreshFireChannels();
+    }
 
-        this.game.tempStrength = Math.min(this.fireStrength, SAFE_FIRE_STRENGTH);
+    private refreshFireChannels(): void {
+        for (const channelId of gameChannelIdList) {
+            const channelConfig = this.game.getChannelConfig(channelId);
+            const overrideConfig = this.config.channels?.[channelId] ?? {};
+            const enabled = channelConfig.enabled && overrideConfig.enabled !== false;
+
+            const requestedStrength = overrideConfig.strength ?? this.config.strength ?? channelConfig.fireStrengthLimit;
+            const fireStrength = Math.min(requestedStrength, channelConfig.fireStrengthLimit || FIRE_MAX_STRENGTH);
+
+            const firePulseId = overrideConfig.pulseId
+                || this.config.pulseId
+                || channelConfig.firePulseId
+                || this.game.getCurrentPulseId(channelId);
+
+            this.fireChannels[channelId] = {
+                enabled,
+                fireStrength,
+                currentFireStrength: Math.min(fireStrength, SAFE_FIRE_STRENGTH),
+                firePulseId,
+            };
+
+            this.game.setTempStrength(
+                channelId,
+                enabled ? Math.min(fireStrength, SAFE_FIRE_STRENGTH) : 0,
+            );
+        }
+    }
+
+    private getEnabledChannels(): GameChannelId[] {
+        return gameChannelIdList.filter((channelId) => this.fireChannels[channelId].enabled && this.fireChannels[channelId].fireStrength > 0);
+    }
+
+    private async applyCurrentFireStrength(channelId: GameChannelId): Promise<void> {
+        const fireState = this.fireChannels[channelId];
+        const baseStrength = this.game.strengthConfig[channelId].strength;
+        const limit = this.game.getChannelClientStrength(channelId).limit;
+        const absoluteStrength = Math.min(baseStrength + fireState.currentFireStrength, limit);
+        await this.game.setChannelStrength(channelId, absoluteStrength);
+    }
+
+    private async restoreBaseStrength(): Promise<void> {
+        await Promise.all(
+            gameChannelIdList.map(async (channelId) => {
+                this.game.setTempStrength(channelId, 0);
+                await this.game.setChannelStrength(channelId, this.game.strengthConfig[channelId].strength);
+            })
+        );
     }
 
     async execute(ab: AbortController, harvest: () => void, done: () => void): Promise<void> {
-        this.currentFireStrength = Math.min(this.fireStrength, SAFE_FIRE_STRENGTH);
-        this.game.tempStrength = this.currentFireStrength;
+        const enabledChannels = this.getEnabledChannels();
+        if (enabledChannels.length === 0) {
+            done();
+            return;
+        }
 
-        let absoluteStrength = 0;
+        for (const channelId of enabledChannels) {
+            const fireState = this.fireChannels[channelId];
+            fireState.currentFireStrength = Math.min(fireState.fireStrength, SAFE_FIRE_STRENGTH);
+            this.game.setTempStrength(channelId, fireState.currentFireStrength);
+        }
 
-        let outputTime = Math.min(this.fireEndTimestamp - Date.now(), 30000); // 单次最多输出30秒
+        await Promise.all(enabledChannels.map((channelId) => this.applyCurrentFireStrength(channelId)));
 
-        absoluteStrength = Math.min(this.game.strengthConfig.strength + this.currentFireStrength, this.game.gameStrength.limit);
-        await this.game.setClientStrength(absoluteStrength);
-
-        // 如果目标强度大于初始强度，则逐渐增加强度
-        let boostAb = new AbortController();
-
+        const boostAb = new AbortController();
         ab.signal.addEventListener('abort', () => {
-            boostAb.abort(); // 中断增加强度的任务
+            boostAb.abort();
         });
-        
-        let setStrengthInterval = setInterval(() => {
-            if (boostAb.signal.aborted) { // 任务被中断
+
+        const setStrengthInterval = setInterval(() => {
+            if (boostAb.signal.aborted) {
                 clearInterval(setStrengthInterval);
                 return;
             }
 
-            if (this.currentFireStrength >= this.fireStrength || absoluteStrength >= this.game.clientStrength.limit) {
-                return; // 达到最大强度或限制，不再增加
-            }
+            for (const channelId of enabledChannels) {
+                const fireState = this.fireChannels[channelId];
+                if (fireState.currentFireStrength >= fireState.fireStrength) {
+                    continue;
+                }
 
-            if (this.fireStrength < this.currentFireStrength) {
-                // 降低强度，直接设置
-                this.game.setClientStrength(this.game.strengthConfig.strength).catch((error) => {
-                    console.error('Failed to set strength:', error);
-                });
-            } else {
-                // 逐渐增加强度
-                this.currentFireStrength = Math.min(this.currentFireStrength + FIRE_BOOST_STRENGTH, this.fireStrength);
-                this.game.tempStrength = this.currentFireStrength;
-                absoluteStrength = Math.min(this.game.strengthConfig.strength + this.currentFireStrength, this.game.clientStrength.limit);
-
-                this.game.setClientStrength(absoluteStrength).catch((error) => {
-                    console.error('Failed to set strength:', error);
+                fireState.currentFireStrength = Math.min(
+                    fireState.currentFireStrength + FIRE_BOOST_STRENGTH,
+                    fireState.fireStrength,
+                );
+                this.game.setTempStrength(channelId, fireState.currentFireStrength);
+                this.applyCurrentFireStrength(channelId).catch((error) => {
+                    console.error(`Failed to apply ${channelId.toUpperCase()} fire strength:`, error);
                 });
             }
         }, 200);
 
-        await this.game.client?.outputPulse(this.firePulseId, outputTime, {
-            abortController: ab,
-            bChannel: this.game.gameConfig.enableBChannel,
-            onTimeEnd: () => {
-                boostAb.abort(); // 停止增加强度
-                if (this.fireStrength && Date.now() > this.fireEndTimestamp) { // 一键开火结束
-                    // 提前降低强度
-                    this.game.setClientStrength(this.game.strengthConfig.strength).catch((error) => {
-                        console.error('Failed to set strength:', error);
-                    });
-                }
-            }
-        });
+        const outputTime = Math.min(this.fireEndTimestamp - Date.now(), 30000);
+        await Promise.all(
+            enabledChannels.map((channelId) => {
+                const fireState = this.fireChannels[channelId];
+                return this.game.client?.outputPulse(channelMap[channelId], fireState.firePulseId, outputTime, {
+                    abortController: ab,
+                });
+            })
+        );
 
-        if (this.fireStrength && Date.now() > this.fireEndTimestamp) { // 一键开火结束
-            this.game.tempStrength = 0;
+        boostAb.abort();
+        clearInterval(setStrengthInterval);
+
+        if (Date.now() > this.fireEndTimestamp) {
+            await this.restoreBaseStrength();
             done();
+            return;
         }
+
+        harvest();
     }
 
     updateConfig(config: GameFireActionConfig): void {
-        this.config = config;
-
-        if (config.strength) {
-            this.fireStrength = Math.min(config.strength, this.game.gameConfig.fireStrengthLimit || FIRE_MAX_STRENGTH);
-        }
+        this.config = {
+            ...this.config,
+            ...config,
+            channels: {
+                ...(this.config.channels ?? {}),
+                ...(config.channels ?? {}),
+            },
+        };
 
         if (config.updateMode === 'replace') {
             this.fireEndTimestamp = Date.now() + Math.min(config.time, FIRE_MAX_DURATION);
@@ -119,8 +196,6 @@ export class GameFireAction extends AbstractGameAction<GameFireActionConfig> {
             this.fireEndTimestamp += Math.min(config.time, FIRE_MAX_DURATION);
         }
 
-        if (config.pulseId) {
-            this.firePulseId = config.pulseId;
-        }
+        this.refreshFireChannels();
     }
 }

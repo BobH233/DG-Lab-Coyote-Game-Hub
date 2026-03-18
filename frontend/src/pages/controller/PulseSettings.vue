@@ -1,10 +1,12 @@
 <script lang="ts" setup>
 import Popover from 'primevue/popover';
-import { PulseItemInfo } from '../../type/pulse';
-import { ControllerPageState } from '../../pages/Controller.vue';
 import { Reactive } from 'vue';
 import { ToastServiceMethods } from 'primevue/toastservice';
 import { ConfirmationOptions } from 'primevue/confirmationoptions';
+
+import { GameChannelId } from '../../apis/socketApi';
+import { PulseItemInfo } from '../../type/pulse';
+import { ControllerPageState } from '../../pages/Controller.vue';
 
 defineOptions({
   name: 'PulseSettings',
@@ -14,12 +16,10 @@ const props = defineProps<{
   state: any;
 }>();
 
-// 从父组件获取state
 let parentState: Reactive<ControllerPageState>;
 watch(() => props.state, (value) => {
   parentState = value;
 }, { immediate: true });
-
 
 const customPulseList = computed(() => {
   return parentState.customPulseList.map((item) => ({
@@ -34,14 +34,26 @@ const fullPulseList = computed(() => {
 
 const state = reactive({
   willRenamePulseName: '',
-
   showImportPulseDialog: false,
   showSortPulseDialog: false,
   showRenamePulseDialog: false,
+  sortChannelId: 'a' as GameChannelId,
+  pulseTimeChannelId: 'a' as GameChannelId,
+});
+
+const channelEntries = computed(() => ([
+  { id: 'a', title: 'A通道', accent: 'text-red-500' },
+  { id: 'b', title: 'B通道', accent: 'text-sky-500' },
+]) as const);
+
+const selectedSortPulseIds = computed({
+  get: () => parentState.channels[state.sortChannelId].selectPulseIds,
+  set: (value: string[]) => {
+    parentState.channels[state.sortChannelId].selectPulseIds = value;
+  },
 });
 
 const postCustomPulseConfig = inject<() => void>('postCustomPulseConfig');
-
 const toast = inject<ToastServiceMethods>('parentToast');
 const confirm = inject<{
   require: (option: ConfirmationOptions) => void;
@@ -64,7 +76,7 @@ const presetPulseTimeOptions = [
 ];
 
 const handlePulseImported = async (pulseInfo: PulseItemInfo) => {
-  let duplicate = parentState.customPulseList.find((item) => item.id === pulseInfo.id);
+  const duplicate = parentState.customPulseList.find((item) => item.id === pulseInfo.id);
   if (duplicate) {
     toast?.add({ severity: 'warn', summary: '导入失败', detail: '相同波形已存在', life: 3000 });
     return;
@@ -72,40 +84,46 @@ const handlePulseImported = async (pulseInfo: PulseItemInfo) => {
 
   parentState.customPulseList.push(pulseInfo);
   toast?.add({ severity: 'success', summary: '导入成功', detail: '波形已导入', life: 3000 });
-
   postCustomPulseConfig?.();
 };
 
-const togglePulse = (pulseId: string) => {
-  if (parentState.pulseMode === 'single') {
-    parentState.selectPulseIds = [pulseId];
+const togglePulse = (channelId: GameChannelId, pulseId: string) => {
+  const channelState = parentState.channels[channelId];
+  if (channelState.pulseMode === 'single') {
+    channelState.selectPulseIds = [pulseId];
+    return;
+  }
+
+  if (channelState.selectPulseIds.includes(pulseId)) {
+    channelState.selectPulseIds = channelState.selectPulseIds.filter((id) => id !== pulseId);
   } else {
-    if (parentState.selectPulseIds.includes(pulseId)) {
-      parentState.selectPulseIds = parentState.selectPulseIds.filter((id) => id !== pulseId);
-    } else {
-      parentState.selectPulseIds.push(pulseId);
-    }
+    channelState.selectPulseIds.push(pulseId);
   }
 };
 
-const setFirePulse = (pulseId: string) => {
-  parentState.firePulseId = pulseId;
+const setFirePulse = (channelId: GameChannelId, pulseId: string) => {
+  parentState.channels[channelId].firePulseId = pulseId;
 };
 
-const showPulseTimePopover = (event: MouseEvent) => {
+const showPulseTimePopover = (channelId: GameChannelId, event: MouseEvent) => {
+  state.pulseTimeChannelId = channelId;
   pulseTimePopoverRef.value?.show(event);
+};
+
+const openSortDialog = (channelId: GameChannelId) => {
+  state.sortChannelId = channelId;
+  state.showSortPulseDialog = true;
 };
 
 let renamePulseId = '';
 const handleRenamePulse = async (pulseId: string) => {
   renamePulseId = pulseId;
   state.willRenamePulseName = parentState.customPulseList.find((item) => item.id === pulseId)?.name ?? '';
-
   state.showRenamePulseDialog = true;
 };
 
 const handleRenamePulseConfirm = async (newName: string) => {
-  let pulse = parentState.customPulseList.find((item) => item.id === renamePulseId);
+  const pulse = parentState.customPulseList.find((item) => item.id === renamePulseId);
   if (pulse) {
     pulse.name = newName;
     postCustomPulseConfig?.();
@@ -128,44 +146,71 @@ const handleDeletePulse = async (pulseId: string) => {
     icon: 'pi pi-exclamation-triangle',
     accept: async () => {
       parentState.customPulseList = parentState.customPulseList.filter((item) => item.id !== pulseId);
-      parentState.selectPulseIds = parentState.selectPulseIds.filter((id) => id !== pulseId);
-      if (parentState.selectPulseIds.length === 0) {
-        parentState.selectPulseIds = [fullPulseList.value[0].id];
-      }
+
+      (['a', 'b'] as GameChannelId[]).forEach((channelId) => {
+        const channelState = parentState.channels[channelId];
+        channelState.selectPulseIds = channelState.selectPulseIds.filter((id) => id !== pulseId);
+        if (channelState.firePulseId === pulseId) {
+          channelState.firePulseId = '';
+        }
+        if (channelState.selectPulseIds.length === 0 && fullPulseList.value[0]) {
+          channelState.selectPulseIds = [fullPulseList.value[0].id];
+        }
+      });
 
       postCustomPulseConfig?.();
     },
   });
 };
-
 </script>
 
 <template>
-  <div class="w-full">
-    <div class="flex flex-col justify-between gap-2 mb-2 items-start md:flex-row md:items-center">
-      <h2 class="font-bold text-xl">波形列表</h2>
-      <div class="flex gap-2 items-center">
-        <Button icon="pi pi-sort-alpha-down" title="波形排序" severity="secondary" @click="state.showSortPulseDialog = true"
-          v-if="parentState.pulseMode === 'sequence'"></Button>
-        <Button icon="pi pi-plus" title="导入波形" severity="secondary"
-          @click="state.showImportPulseDialog = true"></Button>
-        <Button icon="pi pi-clock" title="波形切换间隔" severity="secondary" :label="parentState.pulseChangeInterval + 's'"
-          @click="showPulseTimePopover"></Button>
-        <SelectButton v-model="parentState.pulseMode" :options="pulseModeOptions" optionLabel="label" optionValue="value"
-          :allowEmpty="false" aria-labelledby="basic" />
+  <div class="w-full flex flex-col gap-6">
+    <div class="flex flex-col justify-between gap-2 items-start md:flex-row md:items-center">
+      <div>
+        <h2 class="font-bold text-xl">波形列表</h2>
+        <p class="opacity-70 text-sm mt-1">A、B 通道的播放列表、一键开火波形和切换模式已经分离。</p>
+      </div>
+      <Button icon="pi pi-plus" label="导入波形" severity="secondary"
+        @click="state.showImportPulseDialog = true"></Button>
+    </div>
+
+    <div v-for="channel in channelEntries" :key="channel.id" class="channel-section"
+      :class="{ 'channel-disabled': channel.id === 'b' && !parentState.channels.b.enabled }">
+      <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
+        <div>
+          <div class="flex items-center gap-3">
+            <h3 class="text-lg font-bold" :class="channel.accent">{{ channel.title }}</h3>
+            <Tag v-if="channel.id === 'b' && !parentState.channels.b.enabled" severity="warn" value="当前禁用" />
+          </div>
+          <p class="opacity-70 text-sm mt-1">当前波形列表和一键开火波形均独立保存。</p>
+        </div>
+        <div class="flex gap-2 items-center flex-wrap">
+          <Button icon="pi pi-sort-alpha-down" title="波形排序" severity="secondary"
+            @click="openSortDialog(channel.id)" v-if="parentState.channels[channel.id].pulseMode === 'sequence'"></Button>
+          <Button icon="pi pi-clock" title="波形切换间隔" severity="secondary"
+            :label="parentState.channels[channel.id].pulseChangeInterval + 's'"
+            @click="showPulseTimePopover(channel.id, $event)"></Button>
+          <SelectButton v-model="parentState.channels[channel.id].pulseMode" :options="pulseModeOptions"
+            optionLabel="label" optionValue="value" :allowEmpty="false" aria-labelledby="basic" />
+        </div>
+      </div>
+
+      <div v-if="parentState.pulseList" class="grid justify-center grid-cols-1 md:grid-cols-2 gap-4 pb-2">
+        <PulseCard v-for="pulse in fullPulseList" :key="channel.id + '-' + pulse.id" :pulse-info="pulse"
+          :is-current-pulse="parentState.channels[channel.id].selectPulseIds.includes(pulse.id)"
+          :is-fire-pulse="pulse.id === parentState.channels[channel.id].firePulseId"
+          @set-current-pulse="togglePulse(channel.id, $event)"
+          @set-fire-pulse="setFirePulse(channel.id, $event)"
+          @delete-pulse="handleDeletePulse" @rename-pulse="handleRenamePulse" />
+      </div>
+      <div v-else class="flex justify-center py-4">
+        <ProgressSpinner />
       </div>
     </div>
-    <div v-if="parentState.pulseList" class="grid justify-center grid-cols-1 md:grid-cols-2 gap-4 pb-2">
-      <PulseCard v-for="pulse in fullPulseList" :key="pulse.id" :pulse-info="pulse"
-        :is-current-pulse="parentState.selectPulseIds.includes(pulse.id)"
-        :is-fire-pulse="pulse.id === parentState.firePulseId" @set-current-pulse="togglePulse"
-        @set-fire-pulse="setFirePulse" @delete-pulse="handleDeletePulse" @rename-pulse="handleRenamePulse" />
-    </div>
-    <div v-else class="flex justify-center py-4">
-      <ProgressSpinner />
-    </div>
+
     <SortPulseDialog v-model:visible="state.showSortPulseDialog" :pulse-list="parentState.pulseList ?? []"
-      v-model:modelValue="parentState.selectPulseIds" />
+      v-model:modelValue="selectedSortPulseIds" />
     <ImportPulseDialog v-model:visible="state.showImportPulseDialog" @on-pulse-imported="handlePulseImported" />
     <PromptDialog v-model:visible="state.showRenamePulseDialog" @confirm="handleRenamePulseConfirm" title="重命名波形"
       input-label="波形名称" :default-value="state.willRenamePulseName" />
@@ -173,17 +218,31 @@ const handleDeletePulse = async (pulseId: string) => {
     <Popover class="popover-pulseTime" ref="pulseTimePopoverRef">
       <div class="flex flex-col gap-4 w-[25rem]">
         <div>
-          <span class="font-medium block mb-2">波形切换间隔</span>
+          <span class="font-medium block mb-2">{{ state.pulseTimeChannelId.toUpperCase() }}通道波形切换间隔</span>
           <div class="flex gap-2">
             <InputGroup>
-              <InputNumber v-model="parentState.pulseChangeInterval" :min="5" :max="600" />
+              <InputNumber v-model="parentState.channels[state.pulseTimeChannelId].pulseChangeInterval" :min="5" :max="600" />
               <InputGroupAddon>秒</InputGroupAddon>
             </InputGroup>
-            <SelectButton v-model="parentState.pulseChangeInterval" :options="presetPulseTimeOptions" optionLabel="label"
-              optionValue="value" :allowEmpty="false" aria-labelledby="basic" />
+            <SelectButton v-model="parentState.channels[state.pulseTimeChannelId].pulseChangeInterval"
+              :options="presetPulseTimeOptions" optionLabel="label" optionValue="value" :allowEmpty="false"
+              aria-labelledby="basic" />
           </div>
         </div>
       </div>
     </Popover>
   </div>
 </template>
+
+<style scoped lang="scss">
+.channel-section {
+  border: 1px solid var(--p-content-border-color);
+  border-radius: 1rem;
+  padding: 1.25rem;
+  background: color-mix(in srgb, var(--p-surface-0) 92%, transparent);
+}
+
+.channel-disabled {
+  opacity: 0.65;
+}
+</style>

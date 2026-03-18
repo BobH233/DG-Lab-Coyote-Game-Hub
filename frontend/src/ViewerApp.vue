@@ -1,21 +1,34 @@
 <script lang="ts" setup>
-import { SocketApi } from './apis/socketApi';
+import { GameChannelId, SocketApi } from './apis/socketApi';
 import { ServerInfoResData, webApi } from './apis/webApi';
 import { parseChartParams } from './utils/request';
 import { handleApiResponse } from './utils/response';
 
-const state = reactive({
+type ViewerChannelState = {
+  strength: number;
+  randomStrength: number;
+  strengthLimit: number;
+  tempStrength: number;
+  realStrength: number;
+};
+
+const createChannelState = (): ViewerChannelState => ({
   strength: 0,
   randomStrength: 0,
   strengthLimit: 50,
-
   tempStrength: 0,
   realStrength: 0,
+});
 
+const state = reactive({
   clientId: '',
-
+  layout: 'dual' as 'single' | 'dual',
+  channel: 'a' as GameChannelId,
   gameStarted: false,
-
+  channels: {
+    a: createChannelState(),
+    b: createChannelState(),
+  },
   error: null as string | null,
 });
 
@@ -28,11 +41,22 @@ const chartParams = computed(() => {
   return parseChartParams(route);
 });
 
-const chartVal = computed(() => ({
-  valLow: Math.min(state.strength + state.tempStrength, state.strengthLimit),
-  valHigh: Math.min(state.strength + state.tempStrength + state.randomStrength, state.strengthLimit),
-  valLimit: state.strengthLimit,
-}));
+const displayChannels = computed<GameChannelId[]>(() => {
+  if (state.layout === 'single') {
+    return [state.channel];
+  }
+
+  return ['a', 'b'];
+});
+
+const getChartVal = (channelId: GameChannelId) => {
+  const channelState = state.channels[channelId];
+  return {
+    valLow: Math.min(channelState.strength + channelState.tempStrength, channelState.strengthLimit),
+    valHigh: Math.min(channelState.strength + channelState.tempStrength + channelState.randomStrength, channelState.strengthLimit),
+    valLimit: channelState.strengthLimit,
+  };
+};
 
 const initServerInfo = async () => {
   try {
@@ -57,16 +81,19 @@ const initWebSocket = async () => {
   });
 
   wsClient.on('strengthChanged', (strength) => {
-    state.strengthLimit = strength.limit;
-    state.tempStrength = strength.tempStrength;
-    state.realStrength = strength.strength;
+    (['a', 'b'] as GameChannelId[]).forEach((channelId) => {
+      state.channels[channelId].strengthLimit = strength[channelId].limit;
+      state.channels[channelId].tempStrength = strength[channelId].tempStrength;
+      state.channels[channelId].realStrength = strength[channelId].strength;
+    });
   });
 
   wsClient.on('strengthConfigUpdated', (config) => {
-    state.strength = config.strength;
-    state.randomStrength = config.randomStrength;
-
-    state.strength = Math.min(state.strength, state.strengthLimit); // 限制当前值不超过上限
+    (['a', 'b'] as GameChannelId[]).forEach((channelId) => {
+      const channelState = state.channels[channelId];
+      channelState.strength = Math.min(config[channelId].strength, channelState.strengthLimit);
+      channelState.randomStrength = config[channelId].randomStrength;
+    });
   });
 
   wsClient.on('gameStarted', () => {
@@ -102,6 +129,11 @@ onMounted(async () => {
   }
 
   state.clientId = urlParams.get('clientId')!;
+  state.layout = urlParams.get('layout') === 'single' ? 'single' : 'dual';
+  state.channel = urlParams.get('channel') === 'b' ? 'b' : 'a';
+  if (urlParams.has('channel')) {
+    state.layout = 'single';
+  }
 
   await initServerInfo();
   await initWebSocket();
@@ -109,13 +141,29 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="w-full h-full">
+  <div class="viewer-root w-full h-full" :class="{ 'viewer-root--single': displayChannels.length === 1 }">
     <RouterView>
       <template #default="{ Component }">
-        <Component :is="Component" v-bind="chartParams" :valLimit="chartVal.valLimit" :valLow="chartVal.valLow"
-          :valHigh="chartVal.valHigh" :strength="state.strength" :randomStrength="state.randomStrength"
-          :tempStrength="state.tempStrength" :realStrength="state.realStrength" :strengthLimit="state.strengthLimit"
-          :running="state.gameStarted" />
+        <div class="viewer-grid">
+          <div v-for="channelId in displayChannels" :key="channelId" class="viewer-panel">
+            <div class="viewer-channel-tag" v-if="displayChannels.length > 1">
+              {{ channelId.toUpperCase() }}通道
+            </div>
+            <Component
+              :is="Component"
+              v-bind="chartParams"
+              :valLimit="getChartVal(channelId).valLimit"
+              :valLow="getChartVal(channelId).valLow"
+              :valHigh="getChartVal(channelId).valHigh"
+              :strength="state.channels[channelId].strength"
+              :randomStrength="state.channels[channelId].randomStrength"
+              :tempStrength="state.channels[channelId].tempStrength"
+              :realStrength="state.channels[channelId].realStrength"
+              :strengthLimit="state.channels[channelId].strengthLimit"
+              :running="state.gameStarted"
+            />
+          </div>
+        </div>
       </template>
     </RouterView>
     <Transition name="fade">
@@ -132,8 +180,51 @@ onMounted(async () => {
 body {
   background-color: transparent;
   height: 100vh;
-  display: grid;
-  place-items: center;
+  margin: 0;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+.viewer-root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  box-sizing: border-box;
+}
+
+.viewer-root--single {
+  padding: 0;
+}
+
+.viewer-grid {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.viewer-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.viewer-channel-tag {
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: white;
+  letter-spacing: 0.04em;
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(8px);
 }
 
 .error-cover {

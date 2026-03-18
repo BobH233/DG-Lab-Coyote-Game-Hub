@@ -21,6 +21,7 @@ import { LocalIPAddress, openBrowser } from './utils/utils.js';
 import { SiteNotificationService } from './services/SiteNotificationService.js';
 import { checkUpdate } from './utils/checkUpdate.js';
 import { CustomSkinService } from './services/CustomSkinService.js';
+import { CoyoteGameConfigService } from './services/CoyoteGameConfigService.js';
 import { createDatabaseConnection } from './database.js';
 import { CoyoteGameManager } from './managers/CoyoteGameManager.js';
 import { ServerContext } from './types/server.js';
@@ -48,6 +49,7 @@ async function main() {
     await DGLabPulseService.instance.initialize();
     await SiteNotificationService.instance.initialize();
     await CustomSkinService.instance.initialize();
+    await CoyoteGameConfigService.instance.initialize();
 
     const serverContext = {
         database,
