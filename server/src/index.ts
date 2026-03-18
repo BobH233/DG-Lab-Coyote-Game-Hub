@@ -69,6 +69,25 @@ async function main() {
         app.use(koaLogger());
     }
 
+    app.use(async (ctx, next) => {
+        const requestedHeaders = ctx.get('Access-Control-Request-Headers');
+        const requestedMethod = ctx.get('Access-Control-Request-Method');
+
+        ctx.set('Access-Control-Allow-Origin', '*');
+        ctx.set('Access-Control-Allow-Methods', requestedMethod ? `${requestedMethod}, OPTIONS` : 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+        ctx.set('Access-Control-Allow-Headers', requestedHeaders || 'Content-Type, Authorization, Mcp-Session-Id, Cache-Control');
+        ctx.set('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+        ctx.vary('Access-Control-Request-Headers');
+        ctx.vary('Access-Control-Request-Method');
+
+        if (ctx.method === 'OPTIONS') {
+            ctx.status = 204;
+            return;
+        }
+
+        await next();
+    });
+
     const router = new KoaRouter();
     const wsRouter = new WebSocketRouter();
 
