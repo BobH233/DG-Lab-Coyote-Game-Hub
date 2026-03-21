@@ -1,4 +1,6 @@
 # 使用服务器搭建服务时的样例配置文件
+# 以下公开地址配置也可通过环境变量覆盖：
+# CGH_WEB_BASE_URL / CGH_WEB_WS_BASE_URL / CGH_CLIENT_WS_BASE_URL / CGH_API_BASE_HTTP_URL
 port: 8920                                  # 服务端口
 host: "0.0.0.0"                             # 监听IP地址
 reverseProxy: true                          # 是否使用反向代理，开启后会使用反向代理给出的客户端IP地址

@@ -1,0 +1,17 @@
+.git
+.github
+.DS_Store
+node_modules
+build
+
+frontend/node_modules
+frontend/dist
+frontend/src/auto-imports.d.ts
+frontend/src/components.d.ts
+
+server/node_modules
+server/dist
+server/dist-bundled
+server/public
+server/config.yaml
+server/data/*.sqlite

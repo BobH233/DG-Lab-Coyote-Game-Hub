@@ -45,6 +45,35 @@
 
 5. 浏览器打开```http://localhost:8920```，即可看到控制面板
 
+## 使用方法（Docker）
+
+1. 在项目根目录构建镜像：
+```bash
+docker build -t coyote-game-hub .
+```
+
+2. 直接运行：
+```bash
+docker run --name coyote-game-hub \
+  -p 8920:8920 \
+  -v $(pwd)/docker-data:/app/server/data \
+  coyote-game-hub
+```
+
+3. 如果你通过域名和反向代理对外提供服务，建议同时传入公开地址环境变量：
+```bash
+docker run --name coyote-game-hub \
+  -p 8920:8920 \
+  -v $(pwd)/docker-data:/app/server/data \
+  -e CGH_WEB_BASE_URL=https://example.com \
+  -e CGH_WEB_WS_BASE_URL=wss://example.com \
+  -e CGH_CLIENT_WS_BASE_URL=wss://example.com \
+  -e CGH_API_BASE_HTTP_URL=https://example.com \
+  coyote-game-hub
+```
+
+容器工作目录是```/app/server```。首次启动时如果没有```config.yaml```，程序会基于```config.example.yaml```自动生成。默认会把SQLite数据库和脉冲数据放在挂载的```/app/server/data```目录中。
+
 ## 项目结构
 
 - ```server```：服务器端代码
