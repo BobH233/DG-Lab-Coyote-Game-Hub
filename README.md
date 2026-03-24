@@ -74,6 +74,38 @@ docker run --name coyote-game-hub \
 
 容器工作目录是```/app/server```。首次启动时如果没有```config.yaml```，程序会基于```config.example.yaml```自动生成。默认会把SQLite数据库和脉冲数据放在挂载的```/app/server/data```目录中。
 
+## GitHub Actions 自动构建 Docker 镜像
+
+仓库中已提供 [`.github/workflows/docker-image.yml`](.github/workflows/docker-image.yml)，会在以下场景自动构建并推送镜像到 GitHub Container Registry（GHCR）：
+
+1. 推送到```main```或```master```分支
+2. 推送形如```v*```的标签
+3. 手动触发```workflow_dispatch```
+
+镜像地址默认是：
+
+```bash
+ghcr.io/<你的-github-用户名>/<你的仓库名>
+```
+
+例如你的 GitHub 用户名是```bobh```，仓库名保持```DG-Lab-Coyote-Game-Hub```，那么最终镜像会推到：
+
+```bash
+ghcr.io/bobh/dg-lab-coyote-game-hub:latest
+```
+
+首次使用前请确认：
+
+1. 你的 fork 仓库已启用 GitHub Actions
+2. 仓库的 Actions 权限允许```Read and write permissions```
+3. 如果你希望别人也能直接拉取镜像，可以把 GHCR 包可见性改成```public```
+
+拉取示例：
+
+```bash
+docker pull ghcr.io/<你的-github-用户名>/<你的仓库名>:latest
+```
+
 ## 项目结构
 
 - ```server```：服务器端代码
